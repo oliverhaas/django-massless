@@ -20,6 +20,19 @@ class AddHeaderMiddleware:
         return response
 
 
+class SetCookieMiddleware:
+    """Sync middleware: sets a cookie on the response (lands in response.cookies,
+    not response.headers), to prove Set-Cookie survives the bridge."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        response.set_cookie("sid", "abc")
+        return response
+
+
 class AsyncAddHeaderMiddleware:
     """Async middleware variant: async_capable, sets a header asynchronously."""
 

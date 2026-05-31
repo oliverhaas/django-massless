@@ -107,13 +107,17 @@ class MasslessRequest(WSGIRequest):
         from django.contrib.auth import get_user_model
         from django.contrib.auth.models import AnonymousUser
 
+        user_model = get_user_model()
         resolved, sub = self._resolve_user_model()
         if resolved is not None:
             self._user = resolved
             return self._user
         try:
-            self._user = get_user_model().objects.get(pk=sub)
-        except Exception:
+            self._user = user_model.objects.get(pk=sub)
+        except user_model.DoesNotExist:
+            # Legitimate "no such user" -> AnonymousUser. Anything else (e.g.
+            # SynchronousOnlyOperation when called under the running loop) must
+            # propagate so the misuse surfaces instead of silently downgrading.
             self._user = AnonymousUser()
         return self._user
 
@@ -131,13 +135,14 @@ class MasslessRequest(WSGIRequest):
         from django.contrib.auth import get_user_model
         from django.contrib.auth.models import AnonymousUser
 
+        user_model = get_user_model()
         resolved, sub = self._resolve_user_model()
         if resolved is not None:
             self._user = resolved
             return self._user
         try:
-            self._user = await get_user_model().objects.aget(pk=sub)
-        except Exception:
+            self._user = await user_model.objects.aget(pk=sub)
+        except user_model.DoesNotExist:
             self._user = AnonymousUser()
         return self._user
 

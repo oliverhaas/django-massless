@@ -6,6 +6,7 @@ cpdef bytes reason_phrase(int status)
 cdef class Response:
     cdef public int status
     cdef public dict headers
+    cdef public list cookies
     cdef public bytes body
     cdef public bytes content_type
 

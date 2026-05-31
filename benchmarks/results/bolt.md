@@ -3,315 +3,315 @@ Config: C=50 N=10000 target=http://127.0.0.1:8001
 
 ## Framework-bound, no DB
 ### Root JSON Async (/)
-  Reqs/sec     38301.83    2378.45   40578.89
-  Latency        1.30ms   366.67us    11.52ms
+  Reqs/sec     40043.61    1578.76   42386.60
+  Latency        1.24ms   693.06us    20.60ms
   Latency Distribution
-     50%     1.26ms
-     75%     1.31ms
-     90%     1.40ms
-     99%     2.02ms
+     50%     1.21ms
+     75%     1.27ms
+     90%     1.31ms
+     99%     1.60ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Root JSON Sync (/sync)
-  Reqs/sec     38741.38     978.90   40347.82
-  Latency        1.28ms   148.30us     3.37ms
+  Reqs/sec     40142.20    3230.75   43665.99
+  Latency        1.24ms   212.30us     4.17ms
   Latency Distribution
-     50%     1.27ms
-     75%     1.31ms
-     90%     1.36ms
-     99%     1.79ms
+     50%     1.20ms
+     75%     1.26ms
+     90%     1.40ms
+     99%     2.23ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### 10kb JSON Async (/10k-json)
-  Reqs/sec     25681.50     583.72   26308.74
-  Latency        1.94ms    55.65us     4.32ms
+  Reqs/sec     26444.12     869.70   27804.41
+  Latency        1.88ms    81.93us     3.56ms
   Latency Distribution
-     50%     1.93ms
-     75%     1.96ms
-     90%     1.99ms
-     99%     2.10ms
+     50%     1.87ms
+     75%     1.92ms
+     90%     1.97ms
+     99%     2.30ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### 10kb JSON Sync (/sync-10k-json)
-  Reqs/sec     26299.01     771.25   26927.30
-  Latency        1.89ms    76.20us     4.06ms
+  Reqs/sec     27017.08    2036.10   29361.62
+  Latency        1.84ms   123.66us     3.97ms
   Latency Distribution
-     50%     1.88ms
-     75%     1.91ms
-     90%     1.95ms
-     99%     2.15ms
+     50%     1.78ms
+     75%     1.92ms
+     90%     2.08ms
+     99%     2.42ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### 1kb JSON (/1k-json)
-  Reqs/sec     34414.33    1155.51   35840.69
-  Latency        1.44ms   150.01us     4.28ms
+  Reqs/sec     35523.64    1892.99   37842.69
+  Latency        1.41ms   142.78us     3.67ms
   Latency Distribution
-     50%     1.44ms
-     75%     1.47ms
-     90%     1.51ms
-     99%     1.68ms
+     50%     1.38ms
+     75%     1.45ms
+     90%     1.48ms
+     99%     2.05ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### 100kb JSON (/100k-json)
-  Reqs/sec      8522.58     397.24    8818.80
-  Latency        5.85ms   280.14us    13.87ms
+  Reqs/sec      8132.15     679.15    8929.25
+  Latency        6.13ms   486.01us    11.89ms
   Latency Distribution
-     50%     5.80ms
-     75%     5.90ms
-     90%     6.04ms
-     99%     6.92ms
+     50%     6.04ms
+     75%     6.35ms
+     90%     6.69ms
+     99%     8.51ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### 500kb JSON (/500k-json)
- 3850 / 10000   38.50% 1922/s 00m03s
-  Reqs/sec      1905.07      77.78    2110.01
-  Latency       26.18ms     1.17ms    33.62ms
+ 3399 / 10000   33.99% 1885/s 00m03s
+  Reqs/sec      1915.03      75.97    2182.63
+  Latency       26.06ms     1.09ms    33.49ms
   Latency Distribution
-     50%    26.00ms
-     75%    26.56ms
-     90%    27.39ms
-     99%    29.39ms
+     50%    25.88ms
+     75%    26.66ms
+     90%    27.03ms
+     99%    28.88ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### 1mb JSON (/1m-json)
- 3690 / 10000   36.90% 920/s 00m06s
- 5775 / 10000   57.75% 929/s 00m04s
-  Reqs/sec       934.47      44.85    1147.51
-  Latency       53.39ms     2.62ms    68.06ms
+ 175 / 10000    1.75% 873/s 00m11s
+ 2450 / 10000   24.50% 940/s 00m08s
+  Reqs/sec       948.97      34.54    1045.02
+  Latency       52.57ms     2.32ms    63.78ms
   Latency Distribution
-     50%    52.87ms
-     75%    53.62ms
-     90%    55.72ms
-     99%    63.61ms
+     50%    52.36ms
+     75%    52.75ms
+     90%    54.40ms
+     99%    58.41ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Path Param int (/items/12345)
-  Reqs/sec     33381.60     442.82   33726.63
-  Latency        1.49ms    59.12us     3.37ms
+  Reqs/sec     32202.87    1280.78   34061.39
+  Latency        1.54ms    99.58us     3.36ms
   Latency Distribution
-     50%     1.49ms
-     75%     1.50ms
-     90%     1.53ms
-     99%     1.57ms
+     50%     1.52ms
+     75%     1.57ms
+     90%     1.64ms
+     99%     2.25ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Path + Query (/items/12345?q=hello)
-  Reqs/sec     31015.88     248.91   31340.74
-  Latency        1.60ms    47.13us     2.75ms
+  Reqs/sec     31821.94     608.58   32192.40
+  Latency        1.56ms    59.53us     3.91ms
   Latency Distribution
-     50%     1.60ms
-     75%     1.63ms
-     90%     1.65ms
-     99%     1.71ms
+     50%     1.56ms
+     75%     1.59ms
+     90%     1.61ms
+     99%     1.70ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Typed Params (/bench/params/typed/12345?count=3&price=1.5&active=true)
-  Reqs/sec     30521.21    1747.22   31439.97
-  Latency        1.63ms   221.96us     5.52ms
+  Reqs/sec     31689.54     905.84   32212.68
+  Latency        1.57ms    60.86us     3.82ms
   Latency Distribution
-     50%     1.60ms
-     75%     1.63ms
-     90%     1.66ms
-     99%     1.95ms
+     50%     1.56ms
+     75%     1.58ms
+     90%     1.61ms
+     99%     1.75ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Multi Query (/bench/params/multi-query?page=2&limit=20&sort=id&order=asc&filter_active=true&min_price=1.0&max_price=9.0)
-  Reqs/sec     28403.13     774.77   30261.06
-  Latency        1.75ms    65.37us     3.07ms
+  Reqs/sec     27987.36    2675.19   30489.01
+  Latency        1.78ms   282.52us     8.09ms
   Latency Distribution
-     50%     1.77ms
-     75%     1.79ms
-     90%     1.82ms
-     99%     1.89ms
+     50%     1.69ms
+     75%     1.87ms
+     90%     1.99ms
+     99%     3.21ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Header Param (/header)
-  Reqs/sec     29165.36    3557.47   38430.03
-  Latency        1.73ms   295.16us     3.37ms
+  Reqs/sec     30312.02    1811.90   33483.96
+  Latency        1.65ms   229.65us     4.10ms
   Latency Distribution
      50%     1.82ms
-     75%     2.01ms
-     90%     2.17ms
-     99%     2.94ms
+     75%     1.93ms
+     90%     2.05ms
+     99%     2.47ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Cookie Param (/cookie)
-  Reqs/sec     28310.91    4156.43   33597.62
-  Latency        1.77ms   313.08us     3.92ms
+  Reqs/sec     32808.68    7045.96   59494.53
+  Latency        1.60ms   176.63us     4.25ms
   Latency Distribution
-     50%     1.82ms
-     75%     2.01ms
-     90%     2.56ms
-     99%     3.04ms
+     50%     1.80ms
+     75%     1.87ms
+     90%     1.95ms
+     99%     2.21ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Exception 404 (/exc)
-  Reqs/sec     28136.27    1804.53   30899.49
-  Latency        1.77ms   120.85us     3.96ms
+  Reqs/sec     31252.08    1015.50   32067.18
+  Latency        1.59ms    66.43us     3.38ms
   Latency Distribution
-     50%     1.75ms
-     75%     1.79ms
-     90%     1.91ms
-     99%     2.43ms
+     50%     1.57ms
+     75%     1.61ms
+     90%     1.66ms
+     99%     1.86ms
     1xx - 0, 2xx - 0, 3xx - 0, 4xx - 10000, 5xx - 0
 
 ### HTML Response (/html)
- 6499 / 10000   64.99% 32457/s
-  Reqs/sec     33148.34    1296.22   35231.26
-  Latency        1.50ms    63.66us     2.86ms
+  Reqs/sec     37389.32    1868.93   39493.29
+  Latency        1.33ms    64.91us     2.55ms
   Latency Distribution
-     50%     1.52ms
-     75%     1.55ms
-     90%     1.60ms
-     99%     1.76ms
+     50%     1.29ms
+     75%     1.38ms
+     90%     1.45ms
+     99%     1.74ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Redirect 302 (/redirect)
-  Reqs/sec     30260.38    1764.41   31532.74
-  Latency        1.65ms   108.06us     3.29ms
+  Reqs/sec     31760.15    1547.16   33905.21
+  Latency        1.57ms    86.74us     3.23ms
   Latency Distribution
-     50%     1.60ms
-     75%     1.65ms
-     90%     1.73ms
-     99%     2.33ms
+     50%     1.56ms
+     75%     1.61ms
+     90%     1.71ms
+     99%     1.80ms
     1xx - 0, 2xx - 0, 3xx - 10000, 4xx - 0, 5xx - 0
 
 ### JSON Parse/Validate (/bench/parse)
-  Reqs/sec     30654.11    1360.89   33181.99
-  Latency        1.62ms   259.75us     3.71ms
+  Reqs/sec     30742.69    1130.11   33891.93
+  Latency        1.63ms   273.60us     3.54ms
   Latency Distribution
-     50%     1.25ms
-     75%     1.68ms
-     90%     2.85ms
-     99%     2.94ms
+     50%     1.24ms
+     75%     1.56ms
+     90%     2.81ms
+     99%     3.06ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Form urlencoded (/form)
-  Reqs/sec     27873.86     718.82   29218.83
-  Latency        1.79ms   274.78us     3.63ms
+  Reqs/sec     28699.90    1066.31   29515.66
+  Latency        1.74ms   274.19us     4.52ms
   Latency Distribution
-     50%     1.37ms
-     75%     1.64ms
-     90%     3.13ms
-     99%     3.24ms
+     50%     1.34ms
+     75%     1.52ms
+     90%     2.99ms
+     99%     3.19ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Serializer Raw (/bench/serializer-raw)
-  Reqs/sec     31926.20    1424.17   32964.67
-  Latency        1.56ms   274.82us     4.60ms
+  Reqs/sec     31641.33    1062.14   33183.53
+  Latency        1.57ms   247.38us     3.45ms
   Latency Distribution
-     50%     1.19ms
-     75%     1.82ms
-     90%     2.67ms
-     99%     2.91ms
+     50%     1.20ms
+     75%     1.46ms
+     90%     2.74ms
+     99%     2.89ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Serializer Validated (/bench/serializer-validated)
-  Reqs/sec     24906.48    3376.76   28878.98
-  Latency        2.02ms   386.13us     4.58ms
+  Reqs/sec     25637.03    2301.28   27625.69
+  Latency        1.95ms   322.91us     3.82ms
   Latency Distribution
      50%     2.16ms
-     75%     2.29ms
-     90%     2.63ms
-     99%     3.38ms
+     75%     2.26ms
+     90%     2.39ms
+     99%     3.46ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Union Single Concrete (/bench/single)
-  Reqs/sec     34586.84    1309.73   37407.86
-  Latency        1.44ms    89.09us     3.57ms
+  Reqs/sec     34197.29    1246.99   36560.75
+  Latency        1.45ms    86.90us     2.85ms
   Latency Distribution
-     50%     1.45ms
-     75%     1.48ms
-     90%     1.52ms
-     99%     1.69ms
+     50%     1.44ms
+     75%     1.49ms
+     90%     1.55ms
+     99%     1.76ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Union Single (/bench/union-single)
-  Reqs/sec     34603.24    1546.73   36860.86
-  Latency        1.44ms    98.27us     3.51ms
+  Reqs/sec     35644.54    1445.90   38474.96
+  Latency        1.39ms    56.56us     3.41ms
   Latency Distribution
-     50%     1.45ms
-     75%     1.47ms
-     90%     1.51ms
-     99%     1.65ms
+     50%     1.39ms
+     75%     1.45ms
+     90%     1.48ms
+     99%     1.57ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Union List Concrete (/bench/list)
-  Reqs/sec     15363.15     311.07   15724.78
-  Latency        3.24ms   116.81us     5.79ms
+  Reqs/sec     14612.76     568.30   15610.72
+  Latency        3.41ms   137.94us     5.58ms
   Latency Distribution
-     50%     3.23ms
-     75%     3.26ms
-     90%     3.31ms
-     99%     3.73ms
+     50%     3.37ms
+     75%     3.43ms
+     90%     3.63ms
+     99%     4.00ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Union List (/bench/union-list)
-  Reqs/sec     15022.15     262.54   15188.81
-  Latency        3.32ms   112.05us     5.42ms
+  Reqs/sec     14582.91     447.14   15151.15
+  Latency        3.42ms   135.71us     6.08ms
   Latency Distribution
-     50%     3.31ms
-     75%     3.33ms
-     90%     3.37ms
-     99%     3.54ms
+     50%     3.42ms
+     75%     3.47ms
+     90%     3.53ms
+     99%     3.79ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Feed Post Branch (/feed/0)
-  Reqs/sec     28131.11    2276.52   32402.68
-  Latency        1.78ms   242.45us     3.69ms
+ 5790 / 10000   57.90% 28847/s
+  Reqs/sec     28732.89    1513.38   31321.55
+  Latency        1.73ms   280.09us     3.31ms
   Latency Distribution
-     50%     1.96ms
-     75%     2.07ms
-     90%     2.18ms
-     99%     2.90ms
+     50%     1.90ms
+     75%     2.02ms
+     90%     2.14ms
+     99%     2.86ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Feed Comment Branch (/feed/1)
-  Reqs/sec     29105.91    2056.40   34885.49
-  Latency        1.73ms   233.11us     3.24ms
+  Reqs/sec     30272.83    5381.55   50082.96
+  Latency        1.71ms   263.10us     4.17ms
   Latency Distribution
-     50%     1.91ms
-     75%     2.04ms
-     90%     2.14ms
-     99%     2.31ms
+     50%     1.92ms
+     75%     1.98ms
+     90%     2.06ms
+     99%     2.72ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Feed Like Branch (/feed/2)
-  Reqs/sec     29209.64    1501.37   31530.13
-  Latency        1.71ms   207.47us     3.69ms
+  Reqs/sec     26983.32    1961.19   30748.23
+  Latency        1.85ms   321.05us     4.62ms
   Latency Distribution
-     50%     1.93ms
-     75%     2.01ms
-     90%     2.10ms
-     99%     2.35ms
+     50%     1.97ms
+     75%     2.13ms
+     90%     2.43ms
+     99%     3.00ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Feed Mixed 100 (/feed)
-  Reqs/sec     14896.03     252.89   15640.49
-  Latency        3.34ms   108.79us     6.73ms
+  Reqs/sec     15660.39     464.55   15977.32
+  Latency        3.18ms   116.74us     4.76ms
   Latency Distribution
-     50%     3.34ms
-     75%     3.37ms
-     90%     3.41ms
-     99%     3.54ms
+     50%     3.16ms
+     75%     3.20ms
+     90%     3.27ms
+     99%     3.67ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Multi-Response Tuple (/bench/multi/tuple)
-  Reqs/sec     30171.69    2036.53   32879.30
-  Latency        1.66ms   249.05us     3.59ms
+  Reqs/sec     27505.74    4379.70   35944.00
+  Latency        1.83ms   285.37us     4.65ms
   Latency Distribution
-     50%     1.82ms
-     75%     1.92ms
-     90%     2.06ms
-     99%     2.62ms
+     50%     1.87ms
+     75%     2.33ms
+     90%     2.49ms
+     99%     2.77ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0
 
 ### Multi-Response Dict (/bench/multi/dict)
-  Reqs/sec     29505.15    2045.44   32555.03
-  Latency        1.69ms   268.56us     4.49ms
+  Reqs/sec     28691.47    3460.61   34338.56
+  Latency        1.75ms   265.79us     4.43ms
   Latency Distribution
-     50%     1.84ms
-     75%     1.96ms
-     90%     2.08ms
-     99%     2.66ms
+     50%     1.85ms
+     75%     1.99ms
+     90%     2.40ms
+     99%     2.68ms
     1xx - 0, 2xx - 10000, 3xx - 0, 4xx - 0, 5xx - 0

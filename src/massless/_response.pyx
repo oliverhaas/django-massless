@@ -54,6 +54,9 @@ cdef class Response:
                  bytes content_type=b"application/octet-stream"):
         self.status = status
         self.headers = dict(headers) if headers is not None else {}
+        # Set-Cookie cannot live in `headers` (a dict can't hold repeats); the
+        # bridge appends each cookie's OutputString() here, emitted one line each.
+        self.cookies = []
         self.body = body if body is not None else b""
         self.content_type = content_type
 
@@ -79,6 +82,9 @@ cdef class Response:
         cdef object value
         for name, value in self.headers.items():
             parts.append(name.encode("latin1") + b": " + str(value).encode("latin1") + b"\r\n")
+        cdef object cookie
+        for cookie in self.cookies:
+            parts.append(b"Set-Cookie: " + str(cookie).encode("latin1") + b"\r\n")
         parts.append(b"\r\n")
         parts.append(self.body)
         return b"".join(parts)

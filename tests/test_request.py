@@ -1,3 +1,6 @@
+import asyncio
+from pathlib import Path
+
 import pytest
 from django.http import HttpRequest
 from massless._request import MasslessRequest, RequestCore
@@ -256,3 +259,41 @@ def test_user_anonymous_when_no_auth():
     core = RequestCore.py_create(b"GET", b"/", b"", [(b"host", b"ex.com")])
     req = MasslessRequest(core, {})
     assert isinstance(req.user, AnonymousUser)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_aget_user_resolves_real_user():
+    # transaction=True commits so the row is visible to the connection used under
+    # the fresh event loop that asyncio.run() spins up for aget_user().
+    from django.contrib.auth import get_user_model
+
+    user = get_user_model().objects.create_user(username="carol", password="x")
+    core = RequestCore.py_create(b"GET", b"/", b"", [(b"host", b"ex.com")])
+    req = MasslessRequest(core, {})
+    req.auth = {"sub": str(user.pk)}
+    resolved = asyncio.run(req.aget_user())
+    assert resolved.pk == user.pk
+    assert resolved.username == "carol"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_aget_user_anonymous_when_user_missing():
+    from django.contrib.auth.models import AnonymousUser
+
+    core = RequestCore.py_create(b"GET", b"/", b"", [(b"host", b"ex.com")])
+    req = MasslessRequest(core, {})
+    # A sub for a row that does not exist -> DoesNotExist -> AnonymousUser.
+    req.auth = {"sub": "999999"}
+    resolved = asyncio.run(req.aget_user())
+    assert isinstance(resolved, AnonymousUser)
+
+
+def test_sync_user_getter_narrows_except_to_does_not_exist():
+    # Regression: the sync `user` property used `except Exception`, which
+    # swallowed SynchronousOnlyOperation under the event loop and silently
+    # downgraded an authenticated user to AnonymousUser. The source must narrow
+    # to the user model's DoesNotExist instead so unexpected errors surface.
+    pyx = Path(__file__).resolve().parents[1] / "src" / "massless" / "_request.pyx"
+    source = pyx.read_text()
+    assert "except Exception" not in source
+    assert "DoesNotExist" in source

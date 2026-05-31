@@ -101,6 +101,11 @@ cdef Response _django_response_to_massless(object dj_resp):
         if name.lower() == "content-type" or name.lower() == "content-length":
             continue
         resp.headers[name] = value
+    # Django keeps cookies in .cookies (a SimpleCookie), separate from .headers.
+    # Emit each as its own Set-Cookie line so logins/sessions/CSRF survive the bridge.
+    cdef object morsel
+    for morsel in dj_resp.cookies.values():
+        resp.cookies.append(morsel.OutputString())
     return resp
 
 

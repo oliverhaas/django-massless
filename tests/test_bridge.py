@@ -101,6 +101,26 @@ def test_bridge_with_auth_middleware_sets_request_user():
     assert req.user is not None
 
 
+@override_settings(MIDDLEWARE=["tests.bridge_mw.SetCookieMiddleware"])
+def test_bridge_path_emits_set_cookie():
+    # Regression: Django stores cookies in response.cookies (a SimpleCookie),
+    # separate from response.headers, so any Set-Cookie set by bridged
+    # middleware/views must still reach the wire bytes.
+    from massless._protocol import dispatch
+
+    from massless.app import MasslessAPI
+
+    api = MasslessAPI()
+
+    @api.get("/c", bridge=True)
+    async def view():
+        return {"ok": True}
+
+    core = RequestCore.py_create(b"GET", b"/c", b"", [(b"host", b"ex.com")], b"")
+    raw = asyncio.run(dispatch(api, core, 0, -1))
+    assert b"Set-Cookie: sid=abc" in raw
+
+
 @override_settings(MIDDLEWARE=["tests.bridge_mw.AddHeaderMiddleware"])
 def test_bridge_path_runs_fast_tier_after_hooks():
     # A bridged route that is ALSO CORS-wrapped must still get the fast-tier after()

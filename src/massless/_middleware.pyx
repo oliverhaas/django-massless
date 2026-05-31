@@ -189,7 +189,13 @@ cdef class JWTAuth(Middleware):
         cdef str p_b64 = parts[1]
         cdef str s_b64 = parts[2]
         # Verify the alg is HS256 from the header before trusting anything else.
-        cdef dict header = msgspec.json.decode(_b64url_decode(h_b64))
+        # Decode into object (not dict): a segment that is valid JSON but not an
+        # object (e.g. [1,2,3]) would make msgspec raise TypeError, which would
+        # escape before()'s except clause -> 500. Reject it as malformed -> 401.
+        cdef object header_obj = msgspec.json.decode(_b64url_decode(h_b64))
+        if not isinstance(header_obj, dict):
+            raise AuthError("malformed header")
+        cdef dict header = <dict>header_obj
         if header.get("alg") != "HS256":
             raise AuthError("unsupported alg")
         cdef bytes signing_input = (h_b64 + "." + p_b64).encode("ascii")
@@ -201,7 +207,10 @@ cdef class JWTAuth(Middleware):
             raise AuthError("bad signature encoding")
         if not hmac.compare_digest(expected, provided):
             raise AuthError("signature mismatch")
-        cdef dict claims = msgspec.json.decode(_b64url_decode(p_b64))
+        cdef object claims_obj = msgspec.json.decode(_b64url_decode(p_b64))
+        if not isinstance(claims_obj, dict):
+            raise AuthError("malformed payload")
+        cdef dict claims = <dict>claims_obj
         cdef object now = self._now()
         cdef object nbf = claims.get("nbf")
         if nbf is not None and float(nbf) > now:
@@ -222,7 +231,7 @@ cdef class JWTAuth(Middleware):
         cdef dict claims
         try:
             claims = self._verify(token)
-        except (AuthError, msgspec.DecodeError, ValueError):
+        except (AuthError, msgspec.DecodeError, ValueError, TypeError):
             return Response(401, {}, b"Unauthorized", b"text/plain; charset=utf-8")
         req.auth = claims
         return None
