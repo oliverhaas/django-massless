@@ -1,0 +1,124 @@
+[project]
+name = "django-massless"
+version = "0.1.0a1"
+description = "High-performance Django API framework with a Cython request pipeline that defers Django object materialization until touched."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+keywords = ["django", "api", "framework", "cython", "performance", "asgi"]
+authors = [{ name = "Oliver Haas", email = "ohaas@e1plus.de" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Framework :: Django",
+  "Framework :: Django :: 5.2",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Cython",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "Django>=5.2,<7",
+  # Phase 1 will add the C-native pipeline deps (uvloop, httptools, msgspec/orjson).
+]
+
+[project.urls]
+Homepage = "https://github.com/oliverhaas/django-massless"
+Repository = "https://github.com/oliverhaas/django-massless.git"
+
+[dependency-groups]
+dev = [
+  "cython==3.2.4",
+  "django-stubs==6.0.1",
+  "mypy==1.19.1",
+  "pre-commit==4.5.1",
+  "pytest==9.0.2",
+  "pytest-cov==7.1.0",
+  "pytest-django==4.12.0",
+  "pytest-xdist==3.8.0",
+  "ruff==0.15.8",
+]
+
+[build-system]
+requires = ["setuptools>=77", "cython>=3.2"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed", "*.pxd"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.c", "*.cpp", "*.html"]
+
+# Wheel matrix for the compiled extension. Free-threaded (cp3*t) builds are a
+# deliberate v1 non-goal, so they are omitted here.
+[tool.cibuildwheel]
+build = ["cp312-*", "cp313-*", "cp314-*"]
+build-frontend = "build[uv]"
+build-verbosity = 1
+test-command = "python -c \"import django; from django.conf import settings; settings.configure(INSTALLED_APPS=[]); django.setup(); import massless\""
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+fix = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["COM812", "D", "E501", "EM", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "ANN",
+  "ARG",
+  "F841",
+  "FBT",
+  "PT006",
+  "PT011",
+  "PT013",
+  "PT018",
+  "S101",
+  "S105",
+]
+# Benchmark CLI scripts: print is their output mechanism.
+"benchmarks/**" = ["T201"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["mypy_django_plugin.main"]
+pretty = true
+show_error_codes = true
+show_error_context = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[tool.django-stubs]
+django_settings_module = "tests.settings.base"
+
+[tool.pytest.ini_options]
+addopts = "--cov=massless --cov-report=term-missing --cov-report=xml --no-cov-on-fail"
+testpaths = ["tests"]
+xfail_strict = true
+DJANGO_SETTINGS_MODULE = "settings.base"
+pythonpath = ["tests"]
+
+[tool.coverage.run]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+precision = 2
+skip_covered = true
