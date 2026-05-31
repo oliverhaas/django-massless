@@ -100,10 +100,23 @@ TCP accept (uvloop)
 ### 5.1 `_protocol.pyx`
 A Cython `asyncio.Protocol` running on uvloop. Owns an httptools `HttpRequestParser`
 per connection, feeds received bytes to it, and drives the request lifecycle on the
-parser callbacks (`on_url`, `on_header`, `on_body`, `on_message_complete`). Handles
-HTTP/1.1 keep-alive. Backpressure and pipelining are handled minimally (correct, not
-yet tuned). On message complete it schedules the matched view and, when the result
-is ready, hands it to `_response.pyx` and writes to the transport.
+parser callbacks (`on_message_begin`, `on_url`, `on_header`, `on_message_complete`).
+Handles HTTP/1.1 keep-alive.
+
+Each connection processes its requests **strictly in arrival order**: responses are
+never reordered within a connection. The collector resets per-message state on
+`on_message_begin` and snapshots `(method, url, headers)` on `on_message_complete`
+into a list, so when several requests arrive in a single `data_received` buffer
+(HTTP/1.1 pipelining) every one of them is captured independently and none are
+dropped or corrupted. `data_received` matches each captured request and pushes it
+onto a per-connection `asyncio.Queue`. A single worker task per connection (started
+in `connection_made`, cancelled in `connection_lost`) drains the queue and serves
+one request at a time: it builds the response (404 on no match, the matched view's
+result otherwise, 500 on a view exception), hands it to `_response.pyx`, and writes
+it to the transport before starting the next request. Because each connection has its
+own protocol instance and worker task, different connections still run concurrently;
+ordering is enforced only within a connection. Pipelined requests in one buffer are
+therefore all served in order. Backpressure is not yet tuned.
 
 ### 5.2 `_router.pyx`
 Compiles the registered routes at startup into:
@@ -220,6 +233,13 @@ handling beyond a basic 404 and 500.
 
 - **httptools edge cases.** Confirm httptools handles the HTTP/1.1 keep-alive and
   request shapes the bench needs. Fall back only if a benchmark proves it matters.
+- **Pipelining and response ordering.** Handled, not deferred: the collector captures
+  every request in a `data_received` buffer (httptools fires one message cycle per
+  request), and a single per-connection worker task serves them strictly in arrival
+  order, writing each response before starting the next. Responses never reorder
+  within a connection even when an earlier view is slower than a later one, so the
+  HTTP/1.1 order-based response/request matching is never violated. Concurrency across
+  connections is preserved (one worker task per connection).
 - **nogil discipline.** No Python containers or exceptions inside `nogil` sections;
   lean on `libcpp` for the static map. Easy to violate by accident.
 - **Buffer lifetimes.** The request body and header bytes must outlive the parse
