@@ -2,39 +2,41 @@
 
 **Date:** 2026-05-31
 **What:** With Phase 4, the server runs N worker processes via `SO_REUSEPORT` and
-dispatches sync views on a thread-pool. Two measurements: (a) 2-worker N-vs-N on the
+dispatches sync views on a thread-pool. Two measurements: (a) 4-worker N-vs-N on the
 core, and (b) sync vs async dispatch cost. Plus a lifecycle check.
 
-bombardier `-c 50 -n 10000`, same host (loopback), Python 3.14. massless and
-django-bolt run `--processes 2`; plain Django runs `uvicorn --workers 2`.
+Machine: 32 cores, Python 3.14, loopback. massless and django-bolt run `--processes 4`;
+plain Django runs `uvicorn --workers 4`.
 
-## (a) Two workers each, core endpoints
+## (a) Four workers each, core endpoints (saturating load)
 
-| Endpoint | django req/s | bolt req/s | massless req/s | vs bolt |
-|----------|-------------:|-----------:|---------------:|--------:|
-| `/` | 4,387 | 75,924 | 83,307 | 1.10x |
-| `/10k-json` | 3,580 | 52,697 | 49,906 | 0.95x |
-| `/items/12345` | 4,042 | 65,695 | 75,963 | 1.16x |
-| `/items/12345?q=hello` | 4,005 | 65,485 | 71,083 | 1.09x |
+A first attempt drove each server with a single `bombardier -c 50` and produced a flat
+~80K ceiling that made the frameworks look "converged." That was a **measurement bug,
+not a result**: one bombardier process is itself CPU-bound (~one core, mostly loopback
+syscalls), so it cannot saturate four workers. Re-measured with
+[`aggregate.sh`](../aggregate.sh) (8 parallel bombardier clients), the server workers
+hit **~400% CPU (4 cores, fully saturated)** while the 32-core box stayed ~93% idle, so
+these are genuinely **server-bound** numbers. Aggregate req/s across the 8 clients:
 
-**Read this with the caveat below, not as "the single-process 2x advantage
-disappeared."** At 2 workers massless and django-bolt are comparable here, but the
-numbers are almost certainly **harness-ceiling-bound, not server-bound**:
+| Endpoint | django req/s | bolt req/s | massless req/s | vs bolt | vs django |
+|----------|-------------:|-----------:|---------------:|--------:|----------:|
+| `/` | 7,679 | 131,825 | 170,896 | **1.30x** | 22x |
+| `/items/12345?q=hello` | 7,095 | 111,911 | 147,080 | **1.31x** | 21x |
+| `/10k-json` | 6,338 | 91,399 | 97,854 | 1.07x | 15x |
 
-- massless single-process was ~76K req/s (PHASE1-3); at 2 workers it is ~83K, i.e.
-  it barely scaled.
-- django-bolt single-process was ~40K; at 2 workers it is ~76K, i.e. it ~doubled.
+At 4 workers massless stays **~1.3x django-bolt** on the routing/dispatch-bound
+endpoints and ~15-22x plain Django. The margin over bolt is smaller than the ~2x of the
+single-process comparison (PHASE1-3): under 4 concurrent workers both frameworks lose
+per-worker efficiency to shared memory bandwidth and the loopback network stack, and
+the gap narrows most on `/10k-json` (1.07x) where serialization, not framework overhead,
+dominates. To verify saturation yourself, watch worker CPU with `pidstat` while
+`aggregate.sh` runs (see its header).
 
-A framework that was already at ~76K single-process cannot show 2x from a second
-worker if the **loopback + single bombardier client saturates around ~80K req/s** on
-this machine. django-bolt, starting below that ceiling, had room to double; massless,
-already near it, did not. So this measures the load harness, not massless's true
-multi-process throughput. A real multi-process scaling number needs a heavier load
-setup (multiple client machines, or higher `-c`, off-loopback). The honest single-
-process per-request-overhead comparison (massless ~2x bolt, ~30x plain Django) is in
-PHASE1-3; this phase's contribution is that multi-process *works* (see lifecycle).
+## (b) Sync dispatch cost (massless)
 
-## (b) Sync dispatch cost (massless, 2 workers)
+These two were measured with a single client (the *ratio* is the point, so compare the
+rows; the absolute numbers are single-client and not directly comparable to the
+saturating aggregates in (a)).
 
 | Endpoint | req/s | relative |
 |----------|------:|---------:|

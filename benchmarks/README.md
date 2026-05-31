@@ -40,6 +40,24 @@ python compare.py results/bolt.md results/massless.md
 (default 2%) on any core framework-bound endpoint, so it doubles as a CI gate once
 there is something to run.
 
+### Multi-process / saturating runs
+
+`run.sh` uses one bombardier process per endpoint, which is fine for single-process
+servers but **cannot saturate a multi-worker server**: one bombardier is itself
+~one-core-bound (mostly loopback syscalls), so a single-client run measures the client,
+not the server. For an `--processes N` server, drive it with several parallel clients
+and sum their throughput with [`aggregate.sh`](aggregate.sh):
+
+```console
+# server: python -m massless app:api --processes 4
+./aggregate.sh 8000 / 8 48 6s        # 8 parallel clients, 48 conns each, 6s
+```
+
+Confirm the result is server-bound (not client-bound) by checking that the worker
+processes are at ~100% CPU each while it runs (`pidstat -u -p "$(pgrep -d, -f 'massless benchmarks')" 4 1`);
+if they are idle, raise the client/connection count. See `aggregate.sh`'s header and
+`results/PHASE4.md` for the saturating multi-process methodology and numbers.
+
 ### Knobs
 
 | Env var | Default | Meaning |
