@@ -99,6 +99,7 @@ ignore = ["COM812", "D", "E501", "EM", "TRY003"]
   "S101",
   "S105",
   "S310",
+  "SLF001",  # tests probe the promotion latch (_is_django) and _promote/_build_wsgi_environ
 ]
 # Benchmark CLI scripts and apps: print is their output; view/settings code is
 # fixture-grade (unused request args, hardcoded secret-key, in-fixture imports).

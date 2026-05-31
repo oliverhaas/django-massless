@@ -25,3 +25,12 @@ async def ten_k_json():
 @api.get("/items/{item_id}")
 async def read_item(item_id: int, q: str | None = None):
     return {"item_id": item_id, "q": q}
+
+
+# Promotion-cost endpoint: the injected request promotes to a real Django
+# HttpRequest on first Django-state access (get_host()/method), exercising the
+# same promotion path as a real view. Lets the Phase 2 benchmark measure
+# promotion overhead vs the non-promoting fast path.
+@api.get("/promote-demo")
+async def promote_demo(request):
+    return {"host": request.get_host(), "method": request.method}

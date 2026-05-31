@@ -65,6 +65,12 @@ def server():
     async def item(item_id: int, q: str | None = None):
         return {"item_id": item_id, "q": q}
 
+    @api.get("/whoami")
+    async def whoami(request):
+        # Touches Django state (get_host()), proving request injection drives
+        # promotion through the real pipeline.
+        return {"host": request.get_host(), "method": request.method}
+
     base_url, stop = _serve(api)
     yield base_url
     stop()
@@ -137,6 +143,16 @@ def test_path_and_query(server):
     assert body == b'{"item_id":12345,"q":"hello"}'
 
 
+def test_request_injection_and_promotion_end_to_end(server):
+    # A view declaring `request` receives the injected MasslessRequest and
+    # promotes when it touches a Django attr (get_host()), end-to-end over the
+    # real server. The Host header is "127.0.0.1:<port>" for urllib requests.
+    host = server.removeprefix("http://")
+    status, body = _get(server + "/whoami")
+    assert status == 200
+    assert body == f'{{"host":"{host}","method":"GET"}}'.encode()
+
+
 def test_no_promotion_on_fast_path(server):
     from massless._request import MasslessRequest
 
@@ -159,11 +175,10 @@ def test_no_promotion_on_fast_path(server):
 
     assert created, "expected requests to be served via MasslessRequest"
     for req in created:
-        # No promotion: the latch attribute was never set, and Django state was never
-        # materialized (touching .GET still raises, as on a pristine fast-path request).
-        assert not hasattr(req, "_is_django")
-        with pytest.raises(AttributeError):
-            _ = req.GET
+        # No promotion: the latch was never flipped (Phase 2 initializes it to
+        # False at construction; only a Django-state access sets it True). The
+        # fast-path endpoints never touch Django state, so it stays False.
+        assert req._is_django is False
 
 
 def test_bench_app_importable_and_serves(tmp_path):
