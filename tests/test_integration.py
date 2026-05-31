@@ -108,3 +108,13 @@ def test_no_promotion_on_fast_path(server):
         assert not hasattr(req, "_is_django")
         with pytest.raises(AttributeError):
             _ = req.GET
+
+
+def test_bench_app_importable_and_serves(tmp_path):
+    import importlib
+
+    bench = importlib.import_module("benchmarks.app")
+    router = bench.api.build_router()
+    assert router.match(b"/")[0] != -1
+    assert router.match(b"/10k-json")[0] != -1
+    assert router.match(b"/items/5")[0] != -1
