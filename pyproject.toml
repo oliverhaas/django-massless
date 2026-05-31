@@ -45,6 +45,7 @@ dev = [
   "pytest-django==4.12.0",
   "pytest-xdist==3.8.0",
   "ruff==0.15.15",
+  "uvicorn==0.41.0",
 ]
 
 [build-system]
@@ -99,8 +100,9 @@ ignore = ["COM812", "D", "E501", "EM", "TRY003"]
   "S105",
   "S310",
 ]
-# Benchmark CLI scripts and apps: print is their output; views need no annotations.
-"benchmarks/**" = ["ANN", "T201"]
+# Benchmark CLI scripts and apps: print is their output; view/settings code is
+# fixture-grade (unused request args, hardcoded secret-key, in-fixture imports).
+"benchmarks/**" = ["ANN", "ARG001", "PLC0415", "S105", "T201"]
 
 [tool.mypy]
 python_version = "3.12"
