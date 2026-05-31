@@ -55,3 +55,36 @@ def test_global_default_middleware_prepended():
     assert routes["/y"].middleware == [g, r]
     assert routes["/z"].middleware == [g]
     assert routes["/z"].bridge is False
+
+
+def test_route_is_async_flag():
+    api = MasslessAPI()
+
+    @api.get("/a")
+    async def a():
+        return {}
+
+    @api.get("/s")
+    def s():
+        return {}
+
+    routes = {route.path: route for route in api.routes}
+    assert routes["/a"].is_async is True
+    assert routes["/s"].is_async is False
+
+
+def test_startup_shutdown_hook_registries():
+    api = MasslessAPI()
+
+    @api.on_startup
+    def boot():
+        return None
+
+    @api.on_shutdown
+    async def stop():
+        return None
+
+    assert api.on_startup_hooks == [boot]
+    assert api.on_shutdown_hooks == [stop]
+    # The decorator returns the callable unchanged.
+    assert boot() is None

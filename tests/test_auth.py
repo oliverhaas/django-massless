@@ -57,9 +57,11 @@ def test_valid_token_sets_auth_no_short_circuit():
 def test_tampered_signature_401():
     secret = "s"
     token = make_jwt({"sub": "42", "exp": time.time() + 3600}, secret)
-    # Flip a char in the signature segment.
+    # Flip the FIRST char of the signature segment. (The last base64url char of a
+    # 32-byte HMAC encodes 2 "don't-care" padding bits, so flipping it can decode
+    # to the same bytes ~6% of the time; the first char always changes 6 real bits.)
     head, payload, sig = token.split(".")
-    tampered = f"{head}.{payload}.{sig[:-1]}{'A' if sig[-1] != 'A' else 'B'}"
+    tampered = f"{head}.{payload}.{'A' if sig[0] != 'A' else 'B'}{sig[1:]}"
     mw = JWTAuth(secret=secret)
     resp = mw.before(_req_with_auth(tampered))
     assert isinstance(resp, Response)

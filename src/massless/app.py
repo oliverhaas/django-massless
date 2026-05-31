@@ -54,6 +54,7 @@ class Route:
     param_name: str | None
     middleware: list  # compiled fast-tier chain (global defaults + per-route), in order
     bridge: bool  # run the view through Django's real middleware chain
+    is_async: bool  # async def -> awaited on the loop; def -> run on the thread-pool executor
 
 
 class MasslessAPI:
@@ -61,6 +62,14 @@ class MasslessAPI:
         self.routes: list[Route] = []
         # Global default fast-tier middleware, prepended to every route's chain.
         self.middleware: list = list(middleware) if middleware is not None else []
+        # Lifecycle hooks: zero-arg sync-or-async callables run once per worker.
+        self.on_startup_hooks: list[Callable] = []
+        self.on_shutdown_hooks: list[Callable] = []
+        # Sync-view dispatch carries a ThreadPoolExecutor, built lazily in the
+        # protocol (_get_executor). ``_max_workers`` is set by the runner from
+        # ``--workers``; None lets ThreadPoolExecutor pick its default.
+        self.executor: object | None = None
+        self._max_workers: int | None = None
 
     def get(self, path: str, middleware: list | None = None, bridge: bool = False) -> Callable:  # noqa: FBT001, FBT002
         def decorator(view: Callable) -> Callable:
@@ -68,6 +77,16 @@ class MasslessAPI:
             return view
 
         return decorator
+
+    def on_startup(self, func: Callable) -> Callable:
+        """Register a zero-arg (sync or async) callable to run before serving."""
+        self.on_startup_hooks.append(func)
+        return func
+
+    def on_shutdown(self, func: Callable) -> Callable:
+        """Register a zero-arg (sync or async) callable to run after the server stops."""
+        self.on_shutdown_hooks.append(func)
+        return func
 
     def _register(
         self,
@@ -79,6 +98,9 @@ class MasslessAPI:
         binder = build_binder(view)
         # Compile the per-route chain: global defaults first, then route-specific.
         chain = [*self.middleware, *(middleware or [])]
+        # Choose the dispatch path once at registration: async views are awaited
+        # on the loop; sync (def) views run on the thread-pool executor.
+        is_async = inspect.iscoroutinefunction(view)
         match = _PARAM_RE.match(path)
         if match:
             route = Route(
@@ -90,6 +112,7 @@ class MasslessAPI:
                 param_name=match["name"],
                 middleware=chain,
                 bridge=bridge,
+                is_async=is_async,
             )
         else:
             route = Route(
@@ -101,6 +124,7 @@ class MasslessAPI:
                 param_name=None,
                 middleware=chain,
                 bridge=bridge,
+                is_async=is_async,
             )
         self.routes.append(route)
 

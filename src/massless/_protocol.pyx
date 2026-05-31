@@ -1,6 +1,14 @@
 import asyncio
+import functools
+import logging
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 import httptools
+
+from django.conf import settings
+
+_logger = logging.getLogger("massless")
 
 from massless._request cimport RequestCore
 from massless._middleware cimport run_after, run_before
@@ -132,20 +140,56 @@ async def dispatch(api, core, int route_id, long param):
 
     kwargs = route.binder(request, path_params, request.query_param)
 
-    if route.bridge:
-        request._promote()
-        handler = _get_bridge(api)
-        dj_resp = await handler.run(request, route.view, kwargs)
-        resp = _django_response_to_massless(dj_resp)
-        if chain:
-            run_after(chain, request, resp)
-        return resp.to_bytes(True)
-
-    result = await route.view(**kwargs)
-    resp = _wrap_result(result)
+    try:
+        if route.bridge:
+            request._promote()
+            handler = _get_bridge(api)
+            dj_resp = await handler.run(request, route.view, kwargs)
+            resp = _django_response_to_massless(dj_resp)
+        elif route.is_async:
+            result = await route.view(**kwargs)
+            resp = _wrap_result(result)
+        else:
+            # Sync (def) view: run off the loop thread on the thread-pool executor,
+            # where blocking work (including the Django ORM) is safe.
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                _get_executor(api), functools.partial(route.view, **kwargs)
+            )
+            resp = _wrap_result(result)
+    except Exception:
+        _logger.exception("view error")
+        resp = _error_response()
     if chain:
         run_after(chain, request, resp)
     return resp.to_bytes(True)
+
+
+cdef Response _error_response():
+    """Build a 500 Response. In DEBUG the body carries the traceback; otherwise a
+    generic message. Guards ``settings.configured`` so fast-path-only apps without
+    Django settings still produce a clean 500."""
+    cdef bytes body
+    if settings.configured and settings.DEBUG:
+        body = traceback.format_exc().encode("utf-8", "replace")
+    else:
+        body = b"Internal Server Error"
+    return Response(500, {}, body, b"text/plain; charset=utf-8")
+
+
+cdef object _get_executor(api):
+    """Lazily build and cache the ThreadPoolExecutor on the api (once per process).
+
+    Sync (def) views run here via ``loop.run_in_executor`` so their blocking work
+    (including the Django ORM) stays off the loop thread. ``api._max_workers`` (set
+    by the runner from ``--workers``) overrides the default pool size.
+    """
+    executor = getattr(api, "executor", None)
+    if executor is None:
+        max_workers = getattr(api, "_max_workers", None)
+        executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="massless")
+        api.executor = executor
+    return executor
 
 
 cdef object _get_bridge(api):
