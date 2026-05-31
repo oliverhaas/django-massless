@@ -159,11 +159,10 @@ def test_no_promotion_on_fast_path(server):
 
     assert created, "expected requests to be served via MasslessRequest"
     for req in created:
-        # No promotion: the latch attribute was never set, and Django state was never
-        # materialized (touching .GET still raises, as on a pristine fast-path request).
-        assert not hasattr(req, "_is_django")
-        with pytest.raises(AttributeError):
-            _ = req.GET
+        # No promotion: the latch was never flipped (Phase 2 initializes it to
+        # False at construction; only a Django-state access sets it True). The
+        # fast-path endpoints never touch Django state, so it stays False.
+        assert req._is_django is False
 
 
 def test_bench_app_importable_and_serves(tmp_path):

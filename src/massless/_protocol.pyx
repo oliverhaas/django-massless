@@ -21,12 +21,14 @@ cdef class _Collector:
     """
     cdef public bytes url
     cdef public list headers
-    cdef public list requests   # list[tuple[method, url, headers]], one per complete message
+    cdef public bytes body      # accumulated request body for the current message
+    cdef public list requests   # list[tuple[method, url, headers, body]], one per complete message
     cdef object _parser         # the HttpRequestParser, for get_method()
 
     def __cinit__(self):
         self.headers = []
         self.url = b""
+        self.body = b""
         self.requests = []
         self._parser = None
 
@@ -37,6 +39,7 @@ cdef class _Collector:
         # New request in this buffer: reset per-message accumulators.
         self.url = b""
         self.headers = []
+        self.body = b""
 
     def on_url(self, bytes url):
         self.url += url   # httptools may deliver the URL in multiple chunks
@@ -44,12 +47,16 @@ cdef class _Collector:
     def on_header(self, bytes name, bytes value):
         self.headers.append((name, value))
 
+    def on_body(self, bytes body):
+        self.body += body   # httptools may deliver the body in multiple chunks
+
     def on_message_complete(self):
-        # Snapshot this message's method/url/headers, then reset per-message state.
+        # Snapshot this message's method/url/headers/body, then reset per-message state.
         method = self._parser.get_method() if self._parser is not None else b"GET"
-        self.requests.append((method, self.url, self.headers))
+        self.requests.append((method, self.url, self.headers, self.body))
         self.url = b""
         self.headers = []
+        self.body = b""
 
     def take(self):
         """Return and clear the requests captured so far."""
@@ -64,11 +71,11 @@ def parse_request(bytes raw):
     parser = httptools.HttpRequestParser(collector)
     collector.set_parser(parser)
     parser.feed_data(raw)
-    method, url, headers = collector.requests[0]
+    method, url, headers, body = collector.requests[0]
     parsed = httptools.parse_url(url)
     cdef bytes path = parsed.path
     cdef bytes query = parsed.query if parsed.query is not None else b""
-    return RequestCore.create(method, path, query, headers)
+    return RequestCore.create(method, path, query, headers, body)
 
 
 async def dispatch(api, core, int route_id, long param):
@@ -117,10 +124,10 @@ class MasslessProtocol(asyncio.Protocol):
 
     def data_received(self, bytes data):
         self._parser.feed_data(data)
-        for method, url, headers in self._collector.take():
+        for method, url, headers, body in self._collector.take():
             parsed = httptools.parse_url(url)
             query = parsed.query if parsed.query is not None else b""
-            core = RequestCore.create(method, parsed.path, query, headers)
+            core = RequestCore.create(method, parsed.path, query, headers, body)
             route_id, param = self._router.match(parsed.path)
             self._queue.put_nowait((core, route_id, param))
 
