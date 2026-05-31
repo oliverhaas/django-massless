@@ -2,6 +2,7 @@ import asyncio
 import socket
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -191,6 +192,18 @@ def test_bench_app_importable_and_serves(tmp_path):
     assert router.match(b"/items/5")[0] != -1
 
 
+def test_bench_phase3_endpoints_registered():
+    import importlib
+
+    bench = importlib.import_module("benchmarks.app")
+    router = bench.api.build_router()
+    for path in (b"/auth/context", b"/auth/me", b"/cors/ping", b"/limited"):
+        rid = router.match(path)[0]
+        assert rid != -1, f"{path!r} did not match"
+        # The fast-tier endpoints carry a compiled middleware chain.
+        assert bench.api.routes[rid].middleware
+
+
 def test_pipelined_requests_both_served_in_order(server):
     # C2: two requests in one buffer must both be served, in arrival order.
     host, port = server.removeprefix("http://").split(":")
@@ -210,3 +223,137 @@ def test_responses_keep_request_order_under_slow_first_view(ordering_server):
     assert len(responses) == 2, f"expected 2 responses, got {len(responses)}: {responses!r}"
     assert responses[0].endswith(b'{"route":"slow","item_id":1}'), responses[0]
     assert responses[1].endswith(b'{"route":"fast","item_id":2}'), responses[1]
+
+
+# --- Phase 3 Task 8/9: fast-tier middleware + bridge through the server ---
+
+
+def _make_jwt(claims, secret):
+    import hashlib
+    import hmac
+    import json
+    from base64 import urlsafe_b64encode
+
+    def b64(data):
+        return urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+    header = b64(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    payload = b64(json.dumps(claims).encode())
+    signing_input = f"{header}.{payload}".encode("ascii")
+    sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+    return f"{header}.{payload}.{b64(sig)}"
+
+
+def _req(url, headers=None, method="GET"):
+    req = urllib.request.Request(url, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+@pytest.fixture
+def mw_server():
+    from massless._middleware import CORS, JWTAuth
+
+    api = MasslessAPI()
+    secret = "s3cret"
+
+    @api.get("/auth/context", middleware=[CORS(allow_origins=["https://ex.com"]), JWTAuth(secret=secret)])
+    async def auth_context(request):
+        return {"sub": request.auth["sub"]}
+
+    base_url, stop = _serve(api)
+    yield base_url, secret
+    stop()
+
+
+def test_cors_preflight_204_through_server(mw_server):
+    base_url, _ = mw_server
+    status, headers, _ = _req(
+        base_url + "/auth/context",
+        method="OPTIONS",
+        headers={"Origin": "https://ex.com", "Access-Control-Request-Method": "GET"},
+    )
+    assert status == 204
+    assert headers.get("Access-Control-Allow-Origin") == "https://ex.com"
+
+
+def test_valid_jwt_200_with_cors_header(mw_server):
+    import time as _t
+
+    base_url, secret = mw_server
+    token = _make_jwt({"sub": "99", "exp": _t.time() + 3600}, secret)
+    status, headers, body = _req(
+        base_url + "/auth/context",
+        headers={"Authorization": "Bearer " + token, "Origin": "https://ex.com"},
+    )
+    assert status == 200
+    assert body == b'{"sub":"99"}'
+    # CORS after() added the header to the real response.
+    assert headers.get("Access-Control-Allow-Origin") == "https://ex.com"
+
+
+def test_bad_token_401_through_server(mw_server):
+    base_url, _ = mw_server
+    status, _, _ = _req(base_url + "/auth/context", headers={"Authorization": "Bearer not.a.jwt"})
+    assert status == 401
+
+
+def test_missing_token_401_through_server(mw_server):
+    base_url, _ = mw_server
+    status, _, _ = _req(base_url + "/auth/context")
+    assert status == 401
+
+
+def test_jwt_endpoint_no_promotion(mw_server):
+    # A JWT endpoint that only reads request.auth must not promote.
+    from massless._request import MasslessRequest
+
+    base_url, secret = mw_server
+    import time as _t
+
+    token = _make_jwt({"sub": "5", "exp": _t.time() + 3600}, secret)
+
+    created = []
+    orig_init = MasslessRequest.__init__
+
+    def spy_init(self, core, path_params):
+        created.append(self)
+        orig_init(self, core, path_params)
+
+    MasslessRequest.__init__ = spy_init
+    try:
+        _req(base_url + "/auth/context", headers={"Authorization": "Bearer " + token})
+        time.sleep(0.2)
+    finally:
+        MasslessRequest.__init__ = orig_init
+
+    assert created
+    for req in created:
+        assert req._is_django is False
+
+
+def test_bridged_route_through_server():
+    from django.test import override_settings
+
+    with override_settings(MIDDLEWARE=["tests.bridge_mw.AddHeaderMiddleware"]):
+        api = MasslessAPI()
+
+        @api.get("/bridged", bridge=True)
+        async def bridged(request):
+            return {"path_seen": request.path}
+
+        base_url, stop = _serve(api)
+        try:
+            status, headers, body = _req(base_url + "/bridged")
+        finally:
+            stop()
+
+    assert status == 200
+    assert headers.get("X-Bridge") == "1"
+    assert headers.get("X-Bridge-Path") == "/bridged"
+    assert body == b'{"path_seen": "/bridged"}'

@@ -52,21 +52,33 @@ class Route:
     is_dynamic: bool
     prefix: bytes
     param_name: str | None
+    middleware: list  # compiled fast-tier chain (global defaults + per-route), in order
+    bridge: bool  # run the view through Django's real middleware chain
 
 
 class MasslessAPI:
-    def __init__(self) -> None:
+    def __init__(self, middleware: list | None = None) -> None:
         self.routes: list[Route] = []
+        # Global default fast-tier middleware, prepended to every route's chain.
+        self.middleware: list = list(middleware) if middleware is not None else []
 
-    def get(self, path: str) -> Callable:
+    def get(self, path: str, middleware: list | None = None, bridge: bool = False) -> Callable:  # noqa: FBT001, FBT002
         def decorator(view: Callable) -> Callable:
-            self._register(path, view)
+            self._register(path, view, middleware=middleware, bridge=bridge)
             return view
 
         return decorator
 
-    def _register(self, path: str, view: Callable) -> None:
+    def _register(
+        self,
+        path: str,
+        view: Callable,
+        middleware: list | None = None,
+        bridge: bool = False,  # noqa: FBT001, FBT002
+    ) -> None:
         binder = build_binder(view)
+        # Compile the per-route chain: global defaults first, then route-specific.
+        chain = [*self.middleware, *(middleware or [])]
         match = _PARAM_RE.match(path)
         if match:
             route = Route(
@@ -76,6 +88,8 @@ class MasslessAPI:
                 is_dynamic=True,
                 prefix=match["prefix"].encode("latin1"),
                 param_name=match["name"],
+                middleware=chain,
+                bridge=bridge,
             )
         else:
             route = Route(
@@ -85,6 +99,8 @@ class MasslessAPI:
                 is_dynamic=False,
                 prefix=path.encode("latin1"),
                 param_name=None,
+                middleware=chain,
+                bridge=bridge,
             )
         self.routes.append(route)
 

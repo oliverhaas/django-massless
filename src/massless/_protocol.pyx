@@ -3,8 +3,10 @@ import asyncio
 import httptools
 
 from massless._request cimport RequestCore
+from massless._middleware cimport run_after, run_before
 from massless._request import MasslessRequest
-from massless._response import build_http_response, serialize_body
+from massless._response cimport Response
+from massless._response import build_http_response
 
 
 cdef class _Collector:
@@ -78,15 +80,82 @@ def parse_request(bytes raw):
     return RequestCore.create(method, path, query, headers, body)
 
 
+cdef Response _wrap_result(object result):
+    """Fold a view return value into a Response (200), unless it already is one."""
+    if isinstance(result, Response):
+        return <Response>result
+    return Response.from_view_result(result)
+
+
+cdef Response _django_response_to_massless(object dj_resp):
+    """Fold a Django HttpResponse (from the bridge) into a massless Response, so the
+    fast-tier after() hooks run uniformly on the bridge path too."""
+    cdef int status = dj_resp.status_code
+    cdef bytes body = dj_resp.content
+    cdef object ctype = dj_resp.headers.get("Content-Type", "application/octet-stream")
+    cdef bytes ctype_b = ctype.encode("latin1") if isinstance(ctype, str) else ctype
+    cdef Response resp = Response(status, {}, body, ctype_b)
+    cdef str name
+    cdef object value
+    for name, value in dj_resp.headers.items():
+        if name.lower() == "content-type" or name.lower() == "content-length":
+            continue
+        resp.headers[name] = value
+    # Django keeps cookies in .cookies (a SimpleCookie), separate from .headers.
+    # Emit each as its own Set-Cookie line so logins/sessions/CSRF survive the bridge.
+    cdef object morsel
+    for morsel in dj_resp.cookies.values():
+        resp.cookies.append(morsel.OutputString())
+    return resp
+
+
 async def dispatch(api, core, int route_id, long param):
-    """Run the matched view and return full HTTP response bytes."""
+    """Run the matched view through the fast-tier middleware and return full
+    HTTP response bytes.
+
+    Flow: build request -> run_before (short-circuit on a Response) -> if
+    bridge: promote + run through Django's real middleware chain -> else call
+    the view -> wrap the return in a Response -> run_after (reverse) -> serialize.
+    """
     route = api.routes[route_id]
     path_params = {route.param_name: param} if route.param_name is not None else {}
     request = MasslessRequest(core, path_params)
+
+    cdef list chain = route.middleware
+    cdef object short = run_before(chain, request) if chain else None
+    cdef Response resp
+    if short is not None:
+        resp = <Response>short
+        if chain:
+            run_after(chain, request, resp)
+        return resp.to_bytes(True)
+
     kwargs = route.binder(request, path_params, request.query_param)
+
+    if route.bridge:
+        request._promote()
+        handler = _get_bridge(api)
+        dj_resp = await handler.run(request, route.view, kwargs)
+        resp = _django_response_to_massless(dj_resp)
+        if chain:
+            run_after(chain, request, resp)
+        return resp.to_bytes(True)
+
     result = await route.view(**kwargs)
-    body, ctype = serialize_body(result)
-    return build_http_response(200, ctype, body, True)
+    resp = _wrap_result(result)
+    if chain:
+        run_after(chain, request, resp)
+    return resp.to_bytes(True)
+
+
+cdef object _get_bridge(api):
+    """Lazily build and cache the BridgeHandler on the api (once per process)."""
+    handler = getattr(api, "_bridge_handler", None)
+    if handler is None:
+        from massless.bridge import BridgeHandler
+        handler = BridgeHandler()
+        api._bridge_handler = handler
+    return handler
 
 
 class MasslessProtocol(asyncio.Protocol):

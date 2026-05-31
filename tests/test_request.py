@@ -1,3 +1,6 @@
+import asyncio
+from pathlib import Path
+
 import pytest
 from django.http import HttpRequest
 from massless._request import MasslessRequest, RequestCore
@@ -212,3 +215,85 @@ def test_get_post_cookies_files_are_identity_stable(attr):
     )
     req = MasslessRequest(core, {})
     assert getattr(req, attr) is getattr(req, attr)
+
+
+# --- Phase 3 Task 6: request.auth + lazy request.user ---
+
+
+def test_auth_defaults_none_and_no_promotion():
+    core = RequestCore.py_create(b"GET", b"/", b"", [])
+    req = MasslessRequest(core, {})
+    assert req.auth is None
+    assert req._is_django is False
+
+
+def test_auth_settable_plain_attr_no_promotion():
+    core = RequestCore.py_create(b"GET", b"/", b"", [])
+    req = MasslessRequest(core, {})
+    req.auth = {"sub": "7", "scope": "read"}
+    assert req.auth == {"sub": "7", "scope": "read"}
+    # Setting/reading auth must not promote.
+    assert req._is_django is False
+
+
+@pytest.mark.django_db
+def test_user_promotes_and_resolves_via_orm():
+    from django.contrib.auth import get_user_model
+
+    user = get_user_model().objects.create_user(username="bob", password="x")
+    core = RequestCore.py_create(b"GET", b"/", b"", [(b"host", b"ex.com")])
+    req = MasslessRequest(core, {})
+    req.auth = {"sub": str(user.pk)}
+    assert req._is_django is False
+    resolved = req.user
+    assert resolved.pk == user.pk
+    assert resolved.username == "bob"
+    # Accessing user promotes the request.
+    assert req._is_django is True
+
+
+@pytest.mark.django_db
+def test_user_anonymous_when_no_auth():
+    from django.contrib.auth.models import AnonymousUser
+
+    core = RequestCore.py_create(b"GET", b"/", b"", [(b"host", b"ex.com")])
+    req = MasslessRequest(core, {})
+    assert isinstance(req.user, AnonymousUser)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_aget_user_resolves_real_user():
+    # transaction=True commits so the row is visible to the connection used under
+    # the fresh event loop that asyncio.run() spins up for aget_user().
+    from django.contrib.auth import get_user_model
+
+    user = get_user_model().objects.create_user(username="carol", password="x")
+    core = RequestCore.py_create(b"GET", b"/", b"", [(b"host", b"ex.com")])
+    req = MasslessRequest(core, {})
+    req.auth = {"sub": str(user.pk)}
+    resolved = asyncio.run(req.aget_user())
+    assert resolved.pk == user.pk
+    assert resolved.username == "carol"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_aget_user_anonymous_when_user_missing():
+    from django.contrib.auth.models import AnonymousUser
+
+    core = RequestCore.py_create(b"GET", b"/", b"", [(b"host", b"ex.com")])
+    req = MasslessRequest(core, {})
+    # A sub for a row that does not exist -> DoesNotExist -> AnonymousUser.
+    req.auth = {"sub": "999999"}
+    resolved = asyncio.run(req.aget_user())
+    assert isinstance(resolved, AnonymousUser)
+
+
+def test_sync_user_getter_narrows_except_to_does_not_exist():
+    # Regression: the sync `user` property used `except Exception`, which
+    # swallowed SynchronousOnlyOperation under the event loop and silently
+    # downgraded an authenticated user to AnonymousUser. The source must narrow
+    # to the user model's DoesNotExist instead so unexpected errors surface.
+    pyx = Path(__file__).resolve().parents[1] / "src" / "massless" / "_request.pyx"
+    source = pyx.read_text()
+    assert "except Exception" not in source
+    assert "DoesNotExist" in source

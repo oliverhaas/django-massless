@@ -2,7 +2,12 @@
 from benchmarks/cases.md. Run: python -m massless benchmarks.app:api
 """
 
+from massless._middleware import CORS, JWTAuth, RateLimit
+
 from massless import MasslessAPI
+
+# Shared secret for the JWT bench endpoints (matches django-bolt's /auth/context case).
+_JWT_SECRET = "bench-secret"
 
 api = MasslessAPI()
 
@@ -34,3 +39,33 @@ async def read_item(item_id: int, q: str | None = None):
 @api.get("/promote-demo")
 async def promote_demo(request):
     return {"host": request.get_host(), "method": request.method}
+
+
+# --- Phase 3 fast-tier middleware endpoints ---
+
+
+# JWT validated, no DB, no promotion: reads only request.auth. Head-to-head with
+# django-bolt's /auth/context.
+@api.get("/auth/context", middleware=[JWTAuth(secret=_JWT_SECRET)])
+async def auth_context(request):
+    return {"sub": request.auth["sub"], "scope": request.auth.get("scope")}
+
+
+# Promotes + ORM user load: reads request.user (resolves via the user model).
+@api.get("/auth/me", middleware=[JWTAuth(secret=_JWT_SECRET)])
+async def auth_me(request):
+    user = await request.aget_user()
+    return {"id": user.pk, "username": getattr(user, "username", None)}
+
+
+# CORS-wrapped route: preflight 204 on the fast path; actual responses carry the
+# Access-Control-Allow-Origin header.
+@api.get("/cors/ping", middleware=[CORS(allow_origins=["*"])])
+async def cors_ping():
+    return {"pong": True}
+
+
+# Rate-limited route: 429 after the limit on the fast path.
+@api.get("/limited", middleware=[RateLimit(limit=100, window_s=1)])
+async def limited():
+    return {"ok": True}

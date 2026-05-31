@@ -98,6 +98,7 @@ ignore = ["COM812", "D", "E501", "EM", "TRY003"]
   "PT018",
   "S101",
   "S105",
+  "S106",    # JWT test tokens use hardcoded secrets by design
   "S310",
   "SLF001",  # tests probe the promotion latch (_is_django) and _promote/_build_wsgi_environ
 ]
@@ -123,6 +124,7 @@ module = [
   "massless._request",
   "massless._response",
   "massless._protocol",
+  "massless._middleware",
 ]
 ignore_missing_imports = true
 
