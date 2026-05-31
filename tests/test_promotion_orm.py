@@ -17,7 +17,7 @@ def test_view_can_use_orm_through_promoted_request():
     # transaction=True commits to the shared-cache test DB so the server thread's
     # own ORM connection sees the row.
     user_model = get_user_model()
-    user_model.objects.create_user(username="alice", password="x")  # noqa: S106
+    user_model.objects.create_user(username="alice", password="x")
     expected = user_model.objects.count()
 
     api = MasslessAPI()

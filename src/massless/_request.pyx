@@ -72,12 +72,74 @@ class MasslessRequest(WSGIRequest):
         self.method = core.method
         self.path = core.path
         self._is_django = False
+        # Fast-tier auth claims, set as a plain instance attribute. Present from
+        # construction so reading/writing request.auth never triggers __getattr__
+        # promotion. JWTAuth sets this to the decoded claims dict.
+        self.auth = None
+        self._user = None
 
     def get_header(self, name):
         return self._core.get_header(name)
 
     def query_param(self, name):
         return self._core.query_param(name)
+
+    # --- lazy DB-backed user (promote + ORM) ---
+    def _resolve_user_model(self):
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import AnonymousUser
+
+        auth = self.auth
+        sub = auth.get("sub") if auth else None
+        if sub is None:
+            return AnonymousUser(), None
+        return None, sub
+
+    @property
+    def user(self):
+        """The DB-backed user. Accessing this promotes the request and resolves
+        the user from request.auth's ``sub`` claim via the user model (sync ORM).
+        Caches on self._user. AnonymousUser when there is no auth/sub."""
+        if self._user is not None:
+            return self._user
+        # Promote: a DB-backed user is a Django concern.
+        self._ensure_promoted()
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import AnonymousUser
+
+        resolved, sub = self._resolve_user_model()
+        if resolved is not None:
+            self._user = resolved
+            return self._user
+        try:
+            self._user = get_user_model().objects.get(pk=sub)
+        except Exception:
+            self._user = AnonymousUser()
+        return self._user
+
+    @user.setter
+    def user(self, value):
+        # Django's AuthenticationMiddleware (bridge tier) assigns request.user;
+        # honor it so the property doesn't shadow a Django-set user.
+        self._user = value
+
+    async def aget_user(self):
+        """Async variant of ``user`` for async views: promote + async ORM get."""
+        if self._user is not None:
+            return self._user
+        self._ensure_promoted()
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import AnonymousUser
+
+        resolved, sub = self._resolve_user_model()
+        if resolved is not None:
+            self._user = resolved
+            return self._user
+        try:
+            self._user = await get_user_model().objects.aget(pk=sub)
+        except Exception:
+            self._user = AnonymousUser()
+        return self._user
 
     # --- promotion ---
     def _build_wsgi_environ(self):
