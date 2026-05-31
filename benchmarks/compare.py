@@ -21,14 +21,14 @@ from pathlib import Path
 REQS_RE = re.compile(r"Reqs/sec\s+([0-9.]+)")
 
 # Framework-bound core endpoints massless must not regress on versus the baseline.
+# Phase 1 ships only framework-bound, no-body, async endpoints. The keys to restore
+# as later phases add header access and request-body parsing are:
+#   Header Param (/header), Cookie Param (/cookie), JSON Parse/Validate (/bench/parse)
 CORE_KEYS = (
     "Root JSON Async (/)",
     "10kb JSON Async (/10k-json)",
     "Path Param int (/items/12345)",
     "Path + Query (/items/12345?q=hello)",
-    "Header Param (/header)",
-    "Cookie Param (/cookie)",
-    "JSON Parse/Validate (/bench/parse)",
 )
 
 
