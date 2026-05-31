@@ -149,6 +149,44 @@ class MasslessRequest(WSGIRequest):
         self._ensure_promoted()
         return HttpRequest.__dict__["headers"].func(self)
 
+    # GET/COOKIES are WSGIRequest cached_propertys; POST/FILES are propertys.
+    # All four are class descriptors, so they shadow __getattr__ and would run
+    # against an unset environ before promotion. Promote first, then delegate.
+    #
+    # POST/FILES read self._post/_files, which _load_post_and_files() sets once,
+    # so their fget is naturally identity-stable. GET/COOKIES are cached_propertys
+    # whose .func() recomputes a fresh QueryDict per call; since this property is a
+    # data descriptor it shadows the instance __dict__ cache cached_property relies
+    # on, so we cache the computed value in a private slot to keep Django's identity
+    # semantics (req.GET is req.GET).
+    @property
+    def GET(self):
+        self._ensure_promoted()
+        cached = self.__dict__.get("_get_cache")
+        if cached is None:
+            cached = WSGIRequest.__dict__["GET"].func(self)
+            self.__dict__["_get_cache"] = cached
+        return cached
+
+    @property
+    def POST(self):
+        self._ensure_promoted()
+        return WSGIRequest.__dict__["POST"].fget(self)
+
+    @property
+    def COOKIES(self):
+        self._ensure_promoted()
+        cached = self.__dict__.get("_cookies_cache")
+        if cached is None:
+            cached = WSGIRequest.__dict__["COOKIES"].func(self)
+            self.__dict__["_cookies_cache"] = cached
+        return cached
+
+    @property
+    def FILES(self):
+        self._ensure_promoted()
+        return WSGIRequest.__dict__["FILES"].fget(self)
+
     @property
     def scheme(self):
         self._ensure_promoted()

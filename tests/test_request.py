@@ -122,6 +122,10 @@ def test_getattr_recursion_guard_clean_attributeerror():
         lambda r: r.headers["X-Test"],
         lambda r: r.get_host(),
         lambda r: r.scheme,
+        lambda r: r.GET,
+        lambda r: r.POST,
+        lambda r: r.COOKIES,
+        lambda r: r.FILES,
     ],
 )
 def test_property_access_promotes(access):
@@ -147,3 +151,64 @@ def test_body_returns_bytes_after_promote():
     )
     req = MasslessRequest(core, {})
     assert req.body == b"hello"
+
+
+# --- Task 6: GET/POST/COOKIES/FILES auto-promote (bypass __getattr__ as descriptors) ---
+def test_get_auto_promotes():
+    core = RequestCore.py_create(b"GET", b"/", b"q=hi&n=3", [(b"host", b"ex.com")], b"")
+    req = MasslessRequest(core, {})
+    assert req._is_django is False
+    assert req.GET["q"] == "hi"  # no explicit _promote() call
+    assert req._is_django is True
+
+
+def test_post_auto_promotes():
+    core = RequestCore.py_create(
+        b"POST",
+        b"/",
+        b"",
+        [(b"host", b"ex.com"), (b"content-type", b"application/x-www-form-urlencoded")],
+        b"a=1&b=2",
+    )
+    req = MasslessRequest(core, {})
+    assert req._is_django is False
+    assert req.POST["a"] == "1"
+    assert req.POST["b"] == "2"
+    assert req._is_django is True
+
+
+def test_cookies_auto_promotes():
+    core = RequestCore.py_create(
+        b"GET",
+        b"/",
+        b"",
+        [(b"host", b"ex.com"), (b"cookie", b"sid=abc; theme=dark")],
+        b"",
+    )
+    req = MasslessRequest(core, {})
+    assert req._is_django is False
+    assert req.COOKIES["sid"] == "abc"
+    assert req.COOKIES["theme"] == "dark"
+    assert req._is_django is True
+
+
+def test_files_auto_promotes():
+    core = RequestCore.py_create(b"GET", b"/", b"", [(b"host", b"ex.com")], b"")
+    req = MasslessRequest(core, {})
+    assert req._is_django is False
+    assert dict(req.FILES) == {}
+    assert req._is_django is True
+
+
+@pytest.mark.parametrize("attr", ["GET", "POST", "COOKIES", "FILES"])
+def test_get_post_cookies_files_are_identity_stable(attr):
+    # Stock Django caches these, so repeated access returns the same object.
+    core = RequestCore.py_create(
+        b"POST",
+        b"/",
+        b"q=1",
+        [(b"host", b"ex.com"), (b"content-type", b"application/x-www-form-urlencoded"), (b"cookie", b"a=b")],
+        b"x=1",
+    )
+    req = MasslessRequest(core, {})
+    assert getattr(req, attr) is getattr(req, attr)
