@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from massless._router import Router
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Callable
 
 _PARAM_RE = re.compile(r"^(?P<prefix>/[^{}]*/)\{(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)\}$")
@@ -54,6 +55,7 @@ class Route:
     param_name: str | None
     middleware: list  # compiled fast-tier chain (global defaults + per-route), in order
     bridge: bool  # run the view through Django's real middleware chain
+    is_async: bool  # async def -> awaited on the loop; def -> run on the thread-pool executor
 
 
 class MasslessAPI:
@@ -61,6 +63,36 @@ class MasslessAPI:
         self.routes: list[Route] = []
         # Global default fast-tier middleware, prepended to every route's chain.
         self.middleware: list = list(middleware) if middleware is not None else []
+        # Lifecycle hooks: zero-arg sync-or-async callables run once per worker.
+        self.on_startup_hooks: list[Callable] = []
+        self.on_shutdown_hooks: list[Callable] = []
+        # Sync-view dispatch carries a ThreadPoolExecutor, built lazily in the
+        # protocol (_get_executor). ``_max_workers`` is set by the runner from
+        # ``--workers``; None lets ThreadPoolExecutor pick its default.
+        self.executor: object | None = None
+        self._max_workers: int | None = None
+        # Graceful-shutdown coordination, shared across all connections of this
+        # worker. ``_inflight`` holds one future per request currently being
+        # handled (resolved when its response is produced); the server's drain
+        # awaits it. ``_draining`` tells ``connection_lost`` not to cancel a
+        # worker that is mid-response once a graceful shutdown has begun.
+        # ``_drain_event`` (created by the server within its running loop) wakes
+        # idle per-connection worker loops so they stop blocking the drain.
+        self._inflight: set[asyncio.Future] = set()
+        self._draining: bool = False
+        self._drain_event: asyncio.Event | None = None
+
+    def begin_drain(self) -> None:
+        """Mark this worker as draining and wake idle connection loops.
+
+        Idempotent. Called by the server once it has stopped accepting so that
+        per-connection worker loops blocked on an empty queue exit promptly while
+        in-flight request work is left to finish.
+        """
+        self._draining = True
+        event = self._drain_event
+        if event is not None:
+            event.set()
 
     def get(self, path: str, middleware: list | None = None, bridge: bool = False) -> Callable:  # noqa: FBT001, FBT002
         def decorator(view: Callable) -> Callable:
@@ -69,6 +101,16 @@ class MasslessAPI:
 
         return decorator
 
+    def on_startup(self, func: Callable) -> Callable:
+        """Register a zero-arg (sync or async) callable to run before serving."""
+        self.on_startup_hooks.append(func)
+        return func
+
+    def on_shutdown(self, func: Callable) -> Callable:
+        """Register a zero-arg (sync or async) callable to run after the server stops."""
+        self.on_shutdown_hooks.append(func)
+        return func
+
     def _register(
         self,
         path: str,
@@ -76,6 +118,16 @@ class MasslessAPI:
         middleware: list | None = None,
         bridge: bool = False,  # noqa: FBT001, FBT002
     ) -> None:
+        # Choose the dispatch path once at registration: async views are awaited
+        # on the loop; sync (def) views run on the thread-pool executor.
+        is_async = inspect.iscoroutinefunction(view)
+        # The bridge runs the view through Django's async middleware chain and
+        # awaits it; a sync view there would fail at request time. Reject it now.
+        if bridge and not is_async:
+            raise ValueError(
+                f"bridge=True requires an async (async def) view; {view.__name__!r} is sync. "
+                "Make the view async, or drop bridge=True to run it on the executor.",
+            )
         binder = build_binder(view)
         # Compile the per-route chain: global defaults first, then route-specific.
         chain = [*self.middleware, *(middleware or [])]
@@ -90,6 +142,7 @@ class MasslessAPI:
                 param_name=match["name"],
                 middleware=chain,
                 bridge=bridge,
+                is_async=is_async,
             )
         else:
             route = Route(
@@ -101,6 +154,7 @@ class MasslessAPI:
                 param_name=None,
                 middleware=chain,
                 bridge=bridge,
+                is_async=is_async,
             )
         self.routes.append(route)
 

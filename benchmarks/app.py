@@ -69,3 +69,10 @@ async def cors_ping():
 @api.get("/limited", middleware=[RateLimit(limit=100, window_s=1)])
 async def limited():
     return {"ok": True}
+
+
+# Sync (def) view: dispatched on the thread-pool executor, off the loop thread.
+# Exercises the Phase 4 executor path for the sync-vs-async benchmark.
+@api.get("/sync-hello")
+def sync_hello():
+    return {"message": "Hello World"}

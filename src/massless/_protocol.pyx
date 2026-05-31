@@ -1,6 +1,15 @@
 import asyncio
+import contextlib
+import functools
+import logging
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 import httptools
+
+from django.conf import settings
+
+_logger = logging.getLogger("massless")
 
 from massless._request cimport RequestCore
 from massless._middleware cimport run_after, run_before
@@ -132,20 +141,56 @@ async def dispatch(api, core, int route_id, long param):
 
     kwargs = route.binder(request, path_params, request.query_param)
 
-    if route.bridge:
-        request._promote()
-        handler = _get_bridge(api)
-        dj_resp = await handler.run(request, route.view, kwargs)
-        resp = _django_response_to_massless(dj_resp)
-        if chain:
-            run_after(chain, request, resp)
-        return resp.to_bytes(True)
-
-    result = await route.view(**kwargs)
-    resp = _wrap_result(result)
+    try:
+        if route.bridge:
+            request._promote()
+            handler = _get_bridge(api)
+            dj_resp = await handler.run(request, route.view, kwargs)
+            resp = _django_response_to_massless(dj_resp)
+        elif route.is_async:
+            result = await route.view(**kwargs)
+            resp = _wrap_result(result)
+        else:
+            # Sync (def) view: run off the loop thread on the thread-pool executor,
+            # where blocking work (including the Django ORM) is safe.
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                _get_executor(api), functools.partial(route.view, **kwargs)
+            )
+            resp = _wrap_result(result)
+    except Exception:
+        _logger.exception("view error")
+        resp = _error_response()
     if chain:
         run_after(chain, request, resp)
     return resp.to_bytes(True)
+
+
+cdef Response _error_response():
+    """Build a 500 Response. In DEBUG the body carries the traceback; otherwise a
+    generic message. Guards ``settings.configured`` so fast-path-only apps without
+    Django settings still produce a clean 500."""
+    cdef bytes body
+    if settings.configured and settings.DEBUG:
+        body = traceback.format_exc().encode("utf-8", "replace")
+    else:
+        body = b"Internal Server Error"
+    return Response(500, {}, body, b"text/plain; charset=utf-8")
+
+
+cdef object _get_executor(api):
+    """Lazily build and cache the ThreadPoolExecutor on the api (once per process).
+
+    Sync (def) views run here via ``loop.run_in_executor`` so their blocking work
+    (including the Django ORM) stays off the loop thread. ``api._max_workers`` (set
+    by the runner from ``--workers``) overrides the default pool size.
+    """
+    executor = getattr(api, "executor", None)
+    if executor is None:
+        max_workers = getattr(api, "_max_workers", None)
+        executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="massless")
+        api.executor = executor
+    return executor
 
 
 cdef object _get_bridge(api):
@@ -186,7 +231,12 @@ class MasslessProtocol(asyncio.Protocol):
         self._worker = asyncio.get_running_loop().create_task(self._process_loop())
 
     def connection_lost(self, exc):
-        if self._worker is not None:
+        # During a graceful drain we must NOT cancel a worker that is mid-response:
+        # the server is waiting for that in-flight request to finish. The worker
+        # loop exits on its own once its queue is idle (see _process_loop). Outside
+        # a drain (e.g. a client drops a keep-alive connection), cancel promptly to
+        # free the blocked ``queue.get()``.
+        if self._worker is not None and not self._api._draining:
             self._worker.cancel()
             self._worker = None
         self._transport = None
@@ -201,21 +251,86 @@ class MasslessProtocol(asyncio.Protocol):
             self._queue.put_nowait((core, route_id, param))
 
     async def _process_loop(self):
+        loop = asyncio.get_running_loop()
+        inflight = self._api._inflight
         try:
             while True:
-                core, route_id, param = await self._queue.get()
-                if route_id == -1:
-                    raw = build_http_response(
-                        404, b"text/plain; charset=utf-8", b"Not Found", True
-                    )
-                else:
-                    try:
-                        raw = await dispatch(self._api, core, route_id, param)
-                    except Exception:
+                # If a drain has begun and this connection has no queued work,
+                # close the connection and stop so it is neither mistaken for
+                # in-flight work nor left holding the server open via wait_closed.
+                if self._api._draining and self._queue.empty():
+                    self._close_transport()
+                    return
+                item = await self._next_item()
+                if item is None:
+                    # Woken by the drain with no queued work: close + exit cleanly.
+                    self._close_transport()
+                    return
+                core, route_id, param = item
+                # Mark this one request as in-flight for the duration of handling
+                # it, so the server's graceful drain can await real request work
+                # (and only real request work) before running shutdown hooks.
+                done = loop.create_future()
+                inflight.add(done)
+                try:
+                    if route_id == -1:
                         raw = build_http_response(
-                            500, b"text/plain; charset=utf-8", b"Internal Server Error", True
+                            404, b"text/plain; charset=utf-8", b"Not Found", True
                         )
-                if self._transport is not None and not self._transport.is_closing():
-                    self._transport.write(raw)
+                    else:
+                        try:
+                            raw = await dispatch(self._api, core, route_id, param)
+                        except Exception:
+                            raw = build_http_response(
+                                500, b"text/plain; charset=utf-8", b"Internal Server Error", True
+                            )
+                    if self._transport is not None and not self._transport.is_closing():
+                        self._transport.write(raw)
+                finally:
+                    inflight.discard(done)
+                    if not done.done():
+                        done.set_result(None)
         except asyncio.CancelledError:
             pass
+
+    def _close_transport(self):
+        """Close this connection's transport if still open (used when a worker
+        loop exits during a graceful drain so the listener's wait_closed can
+        complete)."""
+        if self._transport is not None and not self._transport.is_closing():
+            self._transport.close()
+
+    async def _next_item(self):
+        """Return the next queued (core, route_id, param), or ``None`` if a drain
+        wakes an idle connection that has nothing queued.
+
+        We race ``queue.get()`` against the shared drain event so an idle
+        keep-alive worker loop, otherwise blocked here forever, exits promptly
+        once a graceful shutdown begins instead of stalling the server's drain.
+        """
+        loop = asyncio.get_running_loop()
+        # The drain event is normally created by serve_async; create one lazily
+        # for serving paths (e.g. tests) that drive the protocol directly.
+        if self._api._drain_event is None:
+            self._api._drain_event = asyncio.Event()
+        get_task = loop.create_task(self._queue.get())
+        drain_wait = loop.create_task(self._api._drain_event.wait())
+        try:
+            await asyncio.wait(
+                {get_task, drain_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            drain_wait.cancel()
+        if get_task.done():
+            return get_task.result()
+        # Drain fired first; cancel the pending get. ``Queue.get`` may have
+        # already dequeued an item just before cancellation lands -- if so it is
+        # held in the task result, so re-check rather than dropping a request.
+        get_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await get_task
+        if get_task.cancelled():
+            if not self._queue.empty():
+                return self._queue.get_nowait()
+            return None
+        return get_task.result()

@@ -255,6 +255,35 @@ def _req(url, headers=None, method="GET"):
         return e.code, dict(e.headers), e.read()
 
 
+def test_sync_view_serves_200_through_executor():
+    # A sync (def) view dispatches through the thread-pool executor over the real
+    # server and serves a 200 with the JSON body.
+    api = MasslessAPI()
+
+    @api.get("/sync-hello")
+    def sync_hello():
+        return {"message": "Hello World"}
+
+    base_url, stop = _serve(api)
+    try:
+        status, body = _get(base_url + "/sync-hello")
+    finally:
+        stop()
+    assert status == 200
+    assert body == b'{"message":"Hello World"}'
+
+
+def test_bench_sync_endpoint_registered():
+    import importlib
+
+    bench = importlib.import_module("benchmarks.app")
+    router = bench.api.build_router()
+    rid = router.match(b"/sync-hello")[0]
+    assert rid != -1
+    # It is registered as a sync route (runs on the executor).
+    assert bench.api.routes[rid].is_async is False
+
+
 @pytest.fixture
 def mw_server():
     from massless._middleware import CORS, JWTAuth

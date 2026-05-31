@@ -55,3 +55,59 @@ def test_global_default_middleware_prepended():
     assert routes["/y"].middleware == [g, r]
     assert routes["/z"].middleware == [g]
     assert routes["/z"].bridge is False
+
+
+def test_route_is_async_flag():
+    api = MasslessAPI()
+
+    @api.get("/a")
+    async def a():
+        return {}
+
+    @api.get("/s")
+    def s():
+        return {}
+
+    routes = {route.path: route for route in api.routes}
+    assert routes["/a"].is_async is True
+    assert routes["/s"].is_async is False
+
+
+def test_bridge_with_sync_view_rejected_at_registration():
+    import pytest
+
+    api = MasslessAPI()
+
+    with pytest.raises(ValueError, match="bridge"):
+
+        @api.get("/b", bridge=True)
+        def sync_bridged():  # a sync (def) view cannot be awaited by the bridge
+            return {}
+
+
+def test_bridge_with_async_view_allowed():
+    api = MasslessAPI()
+
+    @api.get("/b", bridge=True)
+    async def async_bridged():
+        return {}
+
+    rid = api.build_router().match(b"/b")[0]
+    assert api.routes[rid].bridge is True
+
+
+def test_startup_shutdown_hook_registries():
+    api = MasslessAPI()
+
+    @api.on_startup
+    def boot():
+        return None
+
+    @api.on_shutdown
+    async def stop():
+        return None
+
+    assert api.on_startup_hooks == [boot]
+    assert api.on_shutdown_hooks == [stop]
+    # The decorator returns the callable unchanged.
+    assert boot() is None

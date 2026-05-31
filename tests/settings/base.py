@@ -6,6 +6,8 @@ ALLOWED_HOSTS = ["*"]
 INSTALLED_APPS = [
     "django.contrib.auth",
     "django.contrib.contenttypes",
+    # Registers the `runmassless` management command for call_command in tests.
+    "massless",
 ]
 
 import tempfile  # noqa: E402
