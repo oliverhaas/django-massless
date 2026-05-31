@@ -1,0 +1,54 @@
+# =============================================================================
+# DISABLED. This file ends in `.disabled` so GitHub ignores it. A commented-out
+# `*.yml` is still parsed by GitHub and shows up as a failing "invalid workflow"
+# run, which is why disabling-by-rename is used instead.
+#
+# PyPI publishing is deferred for now (pre-alpha). To enable releases later:
+#   1. rename this file back to `publish.yml` (and `tag.yml.disabled` -> `tag.yml`)
+#   2. set up the PyPI Trusted Publisher and the `pypi` GitHub environment
+#   3. this is a Cython package, so replace the single `uv build` step below with
+#      a cibuildwheel matrix (ubuntu + macOS) that consumes [tool.cibuildwheel] in
+#      pyproject.toml, so cp312-cp314 platform wheels are built, not just an sdist.
+# =============================================================================
+
+name: Publish to PyPI
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g., 1.0.0)"
+        required: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref }}
+      - uses: astral-sh/setup-uv@v7
+      - run: uv python install 3.12
+      - run: uv sync --group dev
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run pytest -n auto
+
+  publish:
+    needs: [test]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/django-massless/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref }}
+      - uses: astral-sh/setup-uv@v7
+      - run: uv python install 3.12
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
