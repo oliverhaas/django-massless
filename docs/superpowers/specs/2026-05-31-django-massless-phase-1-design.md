@@ -65,10 +65,14 @@ src/massless/
   _router.pyx        # static C hash map + dynamic int-param matcher (nogil)
   _request.pyx       # cdef RequestCore (C storage) + MasslessRequest(HttpRequest) wrapper
   _response.pyx      # C response builder; msgspec/bytes/str body paths
-  _router.pxd        # cimport surface for the router
-  _request.pxd       # cimport surface for MasslessRequest
-  _response.pxd      # cimport surface for the response builder
+  _router.pxd        # cimport surface for the router (MatchResult, match_c)
+  _request.pxd       # cimport surface for RequestCore (used by the protocol)
 ```
+
+In Phase 1 the protocol calls the response builder through a plain Python import of its
+`cpdef` functions (still compiled, one call per request). A `_response.pxd` cimport
+surface for a zero-overhead C-level call is a later-phase optimization, so it is not
+created here.
 
 Each `.pyx` is a small, well-bounded unit with one purpose, testable on its own.
 `app.py` and `__main__.py` are pure Python; they run only on the cold path
@@ -81,7 +85,7 @@ TCP accept (uvloop)
   -> _protocol.pyx feeds bytes to httptools (llhttp)
   -> httptools callbacks fill a RequestCore's C fields           [no Python objects]
      (method, path, query bytes, header map)
-  -> _router.pyx matches path bytes, captures int param          [nogil]
+  -> _router.pyx matches path bytes, captures int param          [GIL-held in P1; nogil later]
   -> at dispatch: wrap RequestCore in a MasslessRequest          [the one Python object]
   -> per-route binder builds view kwargs (path int + query str)
   -> await async view(**kwargs)                                  [the one Python crossing]
@@ -104,13 +108,16 @@ is ready, hands it to `_response.pyx` and writes to the transport.
 ### 5.2 `_router.pyx`
 Compiles the registered routes at startup into:
 - a static table: exact path bytes to route handle, backed by a `libcpp`
-  `unordered_map` for O(1) `nogil` lookup,
+  `unordered_map` for O(1) lookup,
 - a small dynamic table: routes with one int segment (e.g. `/items/{item_id}`),
   matched by splitting on the captured segment and coercing to int.
 
-Lookup returns a route handle plus the captured int param (if any). No Python
-objects touched during match. A miss returns a sentinel that the protocol turns
-into a 404.
+Lookup returns a route handle plus the captured int param (if any). A miss returns a
+sentinel that the protocol turns into a 404. In Phase 1 the match holds the GIL (the
+`bytes`-to-`std::string` conversion and the dynamic scan are GIL-bound); that is
+acceptable because dispatch holds the GIL anyway and the map lookup is already
+C-speed at this route count. A true `nogil` match over a C buffer is the eventual
+target (parent design §3) and a later-phase optimization.
 
 ### 5.3 `_request.pyx`
 Two coupled units. A `cdef class` cannot inherit from `HttpRequest` (a pure-Python

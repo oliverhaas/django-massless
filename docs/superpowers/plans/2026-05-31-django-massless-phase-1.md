@@ -19,6 +19,7 @@
 - **Hot-path modules are `.pyx`** (compiled): `_response.pyx`, `_router.pyx`, `_request.pyx`, `_protocol.pyx`. **Cold-path modules are plain `.py`** (interpreted, not cythonized): `app.py`, `__main__.py`, `__init__.py`. `setup.py` only cythonizes `src/massless/**/*.pyx`, so `.py` files are never compiled.
 - **C++ modules** carry `# distutils: language = c++` as their first line.
 - **Commits:** conventional, one per task minimum.
+- **Formatting:** the pre-commit `ruff-format` hook normalizes files on commit, so the code blocks here need not be hand-formatted. If a commit aborts because a hook reformatted files, re-stage and commit again. CI runs `ruff format --check`, which passes once the hook has formatted the committed code.
 
 ## File Structure
 
@@ -44,12 +45,17 @@
 
 ---
 
-## Task 1: Add Phase 1 runtime dependencies
+## Task 1: Add Phase 1 dependencies and tooling config
+
+The compiled modules ship no type stubs, so mypy needs per-module overrides; the
+benchmark app and tests trip `select = ["ALL"]` rules that must be ignored. Doing
+this config up front keeps every later task green against the CI gates (ruff check,
+ruff format --check, mypy).
 
 **Files:**
-- Modify: `pyproject.toml` (`[project].dependencies`)
+- Modify: `pyproject.toml`
 
-- [ ] **Step 1: Add the dependencies**
+- [ ] **Step 1: Add runtime dependencies**
 
 In `pyproject.toml`, replace the `dependencies` array:
 
@@ -62,21 +68,48 @@ dependencies = [
 ]
 ```
 
-- [ ] **Step 2: Sync**
+- [ ] **Step 2: Tell mypy the compiled extensions have no stubs**
+
+Add to `pyproject.toml` (after the `[tool.django-stubs]` block):
+
+```toml
+[[tool.mypy.overrides]]
+module = ["massless._router", "massless._request", "massless._response", "massless._protocol"]
+ignore_missing_imports = true
+```
+
+- [ ] **Step 3: Extend ruff per-file-ignores**
+
+In `pyproject.toml`, update `[tool.ruff.lint.per-file-ignores]` so the `tests/**`
+list also includes `PLC0415`, `PLR2004`, `S310` (in-function imports, literal
+asserts, and `urlopen` are fine in tests), and change the benchmarks entry to ignore
+annotations too:
+
+```toml
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "ANN", "ARG", "F841", "FBT", "PLC0415", "PLR2004", "PT006", "PT011",
+  "PT013", "PT018", "S101", "S105", "S310",
+]
+# Benchmark CLI scripts and apps: print is their output; views need no annotations.
+"benchmarks/**" = ["ANN", "T201"]
+```
+
+- [ ] **Step 4: Sync (no rebuild needed; no compiled sources exist yet)**
 
 Run: `uv sync --group dev`
 Expected: resolves and installs uvloop, httptools, msgspec.
 
-- [ ] **Step 3: Verify imports**
+- [ ] **Step 5: Verify imports and config**
 
-Run: `uv run python -c "import uvloop, httptools, msgspec; print('ok')"`
-Expected: `ok`
+Run: `uv run python -c "import uvloop, httptools, msgspec; print('ok')" && uv run ruff check && uv run mypy src/massless/`
+Expected: `ok`, then ruff and mypy both clean.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add pyproject.toml uv.lock
-git commit -m "feat: add Phase 1 runtime deps (uvloop, httptools, msgspec)"
+git commit -m "feat: add Phase 1 runtime deps and tooling config"
 ```
 
 ---
@@ -318,6 +351,11 @@ cdef class Router:
         cdef MatchResult r = self.match_c(path)
         return (r.route_id, r.param)
 ```
+
+> **Note:** in Phase 1 `match_c` holds the GIL (the `bytes`→`std::string` conversion, the
+> Python-list dynamic scan, `isdigit()`, and `int()` are all GIL-bound). That is fine here
+> (dispatch holds the GIL anyway, and at this route count the map lookup is already C-speed).
+> A true `nogil` match over a C buffer is a later optimization once route tables are large.
 
 - [ ] **Step 5: Rebuild and run**
 
@@ -619,7 +657,10 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'massless.app'`
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def build_binder(view: Callable) -> Callable[[dict, Callable], dict]:
@@ -738,9 +779,15 @@ class MasslessAPI:
         binder = build_binder(view)
         match = _PARAM_RE.match(path)
         if match:
-            route = Route(path, view, binder, True, match["prefix"].encode("latin1"), match["name"])
+            route = Route(
+                path=path, view=view, binder=binder, is_dynamic=True,
+                prefix=match["prefix"].encode("latin1"), param_name=match["name"],
+            )
         else:
-            route = Route(path, view, binder, False, path.encode("latin1"), None)
+            route = Route(
+                path=path, view=view, binder=binder, is_dynamic=False,
+                prefix=path.encode("latin1"), param_name=None,
+            )
         self.routes.append(route)
 
     def build_router(self) -> Router:
@@ -825,10 +872,14 @@ from massless._response import build_http_response, serialize_body
 
 
 cdef class _Collector:
-    """httptools callback target that accumulates one request into a RequestCore."""
-    cdef bytes url
-    cdef list headers
-    cdef bint complete
+    """httptools callback target that accumulates one request into a RequestCore.
+
+    The attributes are `cdef public` so the plain-Python MasslessProtocol can read
+    them; bare `cdef` fields are invisible to Python and would raise AttributeError.
+    """
+    cdef public bytes url
+    cdef public list headers
+    cdef public bint complete
 
     def __cinit__(self):
         self.headers = []
@@ -836,7 +887,7 @@ cdef class _Collector:
         self.complete = False
 
     def on_url(self, bytes url):
-        self.url = url
+        self.url += url   # httptools may deliver the URL in multiple chunks
 
     def on_header(self, bytes name, bytes value):
         self.headers.append((name, value))
@@ -987,19 +1038,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+from typing import TYPE_CHECKING
 
 import uvloop
 
+from massless._protocol import MasslessProtocol
 
-def load_app(target: str):
+if TYPE_CHECKING:
+    from massless.app import MasslessAPI
+
+
+def load_app(target: str) -> MasslessAPI:
     module_name, _, attr = target.partition(":")
     module = importlib.import_module(module_name)
     return getattr(module, attr or "api")
 
 
-async def serve(api, host: str, port: int) -> None:
-    from massless._protocol import MasslessProtocol
-
+async def serve(api: MasslessAPI, host: str, port: int) -> None:
     router = api.build_router()
     loop = asyncio.get_running_loop()
     server = await loop.create_server(lambda: MasslessProtocol(api, router), host, port)
@@ -1152,15 +1207,19 @@ def test_no_promotion_on_fast_path(server):
     try:
         _get(server + "/")
         _get(server + "/items/12345?q=hello")
-        time_for_tasks = 0.2
         import time
-        time.sleep(time_for_tasks)
+
+        time.sleep(0.2)  # let the response tasks finish
     finally:
         MasslessRequest.__init__ = orig_init
 
     assert created, "expected requests to be served via MasslessRequest"
     for req in created:
-        assert getattr(req, "_is_django", False) is False
+        # No promotion: the latch attribute was never set, and Django state was never
+        # materialized (touching .GET still raises, as on a pristine fast-path request).
+        assert not hasattr(req, "_is_django")
+        with pytest.raises(AttributeError):
+            _ = req.GET
 ```
 
 - [ ] **Step 2: Run test**
@@ -1196,8 +1255,10 @@ from massless import MasslessAPI
 
 api = MasslessAPI()
 
-# A ~10KB JSON payload (100 small objects), built once at import.
-_TEN_K = [{"id": i, "name": f"item-{i}", "value": i * 7, "active": i % 2 == 0} for i in range(100)]
+# JSON payload built once at import. range(100) encodes to ~5KB with msgspec, so use
+# range(200) (~10.6KB) to match the "10kb" label. Confirm the byte size is close to
+# django-bolt's /10k-json payload so the head-to-head comparison stays apples-to-apples.
+_TEN_K = [{"id": i, "name": f"item-{i}", "value": i * 7, "active": i % 2 == 0} for i in range(200)]
 
 
 @api.get("/")
@@ -1220,10 +1281,9 @@ async def read_item(item_id: int, q: str | None = None):
 In `benchmarks/compare.py`, replace the `CORE_KEYS` tuple with the Phase 1 subset and document the deferred keys:
 
 ```python
-# Phase 1 ships only framework-bound, no-body, async endpoints. Restore the
-# remaining core keys as later phases add header access (Header Param, Cookie Param)
-# and request-body parsing (JSON Parse/Validate):
-#   "Header Param (/header)", "Cookie Param (/cookie)", "JSON Parse/Validate (/bench/parse)"
+# Phase 1 ships only framework-bound, no-body, async endpoints. The keys to restore
+# as later phases add header access and request-body parsing are:
+#   Header Param (/header), Cookie Param (/cookie), JSON Parse/Validate (/bench/parse)
 CORE_KEYS = (
     "Root JSON Async (/)",
     "10kb JSON Async (/10k-json)",
