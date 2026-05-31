@@ -86,32 +86,45 @@ Legend: **[reuse]** existing library · **[build]** we write it.
 
 ### Mechanism (Approach A: subclass plus `__getattr__` interception)
 
-`MasslessRequest` is a **regular Python class** that subclasses `HttpRequest`, backed
-by a held `cdef class RequestCore` that owns the C storage. It cannot itself be a
-`cdef class`: a Cython extension type cannot inherit from a pure-Python class such as
-`HttpRequest` (verified: `First base of 'MasslessRequest' is not an extension type`).
-Composition keeps every property Approach A needs (`isinstance`, lazy `__getattr__`
-promotion, C-speed storage, `nogil`-fillable buffers) while compiling cleanly.
+`MasslessRequest` is a **regular Python class** that subclasses **`WSGIRequest`**,
+backed by a held `cdef class RequestCore` that owns the C storage. It cannot itself be
+a `cdef class`: a Cython extension type cannot inherit from a pure-Python class
+(verified: `First base of 'MasslessRequest' is not an extension type`). The base is
+`WSGIRequest`, not `HttpRequest`, because `GET`/`POST`/`COOKIES`/`FILES` are
+descriptors defined on `WSGIRequest` (not `HttpRequest`); `isinstance(req, HttpRequest)`
+still holds since `WSGIRequest` subclasses it. Composition keeps every property
+Approach A needs (`isinstance`, lazy `__getattr__` promotion, C-speed storage) while
+compiling cleanly. (As built in Phase 2; see the Phase 2 design doc.)
 
 ```python
 cdef class RequestCore:           # C storage, nogil-fillable during parse/route
     cdef bytes _method, _path, _query, _body
-    cdef object _headers          # C/C++ header map
-    cdef dict _path_params
+    cdef object _headers          # header list
     # fast-path surface exposed as Cython properties / cpdef:
-    #   method, path, path params, get_header(b'...')  -- served from C, never promotes
-    #   ported Cython middleware use ONLY this surface
+    #   method, path, get_header(b'...'), query_param(...)  -- served from C, never promotes
 
-class MasslessRequest(HttpRequest):   # regular Python subclass; isinstance passes
-    # Built only at view dispatch, wrapping a RequestCore. Does NOT call
-    # HttpRequest.__init__, so Django-machinery attrs are absent until promotion.
-    _is_django = False            # the one-way latch
+class MasslessRequest(WSGIRequest):   # regular Python subclass; isinstance(HttpRequest) holds
+    # Built at view dispatch, wrapping a RequestCore. Does NOT call __init__, so
+    # Django-machinery attrs are absent until promotion.
+    def __init__(self, core, path_params):
+        self._core = core; self.path_params = path_params
+        self.method = core.method; self.path = core.path   # plain attrs (fast path)
+        self._is_django = False                            # the one-way latch
 
-    def __getattr__(self, name):  # Python calls this ONLY when normal lookup fails
-        if not self._is_django:
-            self._promote()       # reconstruct META / GET / POST / body / COOKIES
-            self._is_django = True # ... from the core's C buffers, ONCE, all at once
-        return getattr(self, name)
+    def _promote(self):
+        self._is_django = True                             # latch first (re-entrancy safe)
+        WSGIRequest.__init__(self, self._build_wsgi_environ())  # Django reconstructs META/GET/POST/body/...
+
+    def __getattr__(self, name):   # only on a normal-lookup MISS (plain attrs: META, user, ...)
+        if name.startswith("_") or self.__dict__.get("_is_django"):
+            raise AttributeError(name)
+        self._promote()
+        return object.__getattribute__(self, name)
+
+    # Django attrs that are properties/methods on the class bypass __getattr__, so a
+    # bounded set is overridden to promote-first then delegate: body, headers, encoding,
+    # scheme, get_host, get_port, is_secure, build_absolute_uri, read/readline/__iter__,
+    # and GET/POST/COOKIES/FILES (GET/COOKIES also get deleters for the encoding-set path).
 ```
 
 ### Why it works
