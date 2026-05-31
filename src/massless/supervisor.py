@@ -89,8 +89,11 @@ class Supervisor:
             proc.join(timeout=remaining)
         for proc in self._workers:
             if proc.is_alive():
-                _logger.warning("worker %s did not exit; terminating", proc.pid)
-                proc.terminate()
+                # SIGTERM is the graceful-stop signal workers already handle, so
+                # terminate() (which sends SIGTERM) would be a no-op for a hung
+                # worker. Escalate to SIGKILL, which cannot be caught or ignored.
+                _logger.warning("worker %s did not exit on SIGTERM; killing", proc.pid)
+                proc.kill()
                 proc.join(timeout=self._join_timeout)
         self._workers = []
 

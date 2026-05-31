@@ -8,6 +8,7 @@ wraps it under uvloop with signal handlers for production/CLI use.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import signal
@@ -71,6 +72,10 @@ async def serve_async(  # noqa: PLR0913
     if stop is None:
         stop = asyncio.Event()
 
+    # Reset per-serve drain state and bind the drain event to this loop.
+    api._draining = False  # noqa: SLF001
+    api._drain_event = asyncio.Event()  # noqa: SLF001
+
     await _run_hooks(api.on_startup_hooks)
 
     owns_sock = sock is None
@@ -86,30 +91,66 @@ async def serve_async(  # noqa: PLR0913
     finally:
         # Stop accepting new connections.
         server.close()
-        await server.wait_closed()
+        # Signal connections to wind down BEFORE waiting on the server: on 3.12+
+        # ``wait_closed`` blocks until active connections finish, and idle
+        # keep-alive loops only exit once the drain event is set.
+        api.begin_drain()
+        # Wait (bounded) for in-flight request work to finish -- only real
+        # requests, not idle keep-alive loops.
+        await _drain(api, timeout=drain_timeout)
+        # Connections whose worker loops have exited will close; bound the wait so
+        # a wedged peer cannot hang shutdown past the grace period.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(server.wait_closed(), timeout=drain_timeout)
         if owns_sock:
             sock.close()
-        # Bounded drain for in-flight request tasks.
-        await _drain(loop, timeout=drain_timeout)
         await _run_hooks(api.on_shutdown_hooks)
+        # Shut the sync-view executor down last, waiting (bounded) for any
+        # in-flight sync views (e.g. slow ORM calls) so threads do not leak.
         executor = getattr(api, "executor", None)
         if executor is not None:
-            executor.shutdown(wait=False)
+            await _shutdown_executor(loop, executor, timeout=drain_timeout)
 
 
-async def _drain(loop: asyncio.AbstractEventLoop, *, timeout: float) -> None:  # noqa: ASYNC109
-    """Wait (bounded) for outstanding request tasks to finish.
+async def _drain(api: MasslessAPI, *, timeout: float) -> None:  # noqa: ASYNC109
+    """Wait (bounded) for outstanding in-flight request work to finish.
 
-    The protocol's per-connection worker tasks are the in-flight work; give them a
-    bounded grace period rather than hanging forever.
+    ``api._inflight`` holds one future per request currently being handled; each
+    resolves when its response is produced. We await the snapshot, then re-check
+    for late arrivals (pipelined behind an in-flight request) until either the
+    set is empty or the grace period elapses, then cancel any stragglers.
     """
-    current = asyncio.current_task()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        pending = [t for t in asyncio.all_tasks(loop) if t is not current and not t.done()]
-        if not pending:
-            return
-        await asyncio.sleep(0.01)
+    while api._inflight:  # noqa: SLF001
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        pending = set(api._inflight)  # noqa: SLF001
+        await asyncio.wait(pending, timeout=remaining)
+    # Past the grace period: cancel any request futures still outstanding.
+    for fut in list(api._inflight):  # noqa: SLF001
+        if not fut.done():
+            fut.cancel()
+
+
+async def _shutdown_executor(
+    loop: asyncio.AbstractEventLoop,
+    executor: object,
+    *,
+    timeout: float,  # noqa: ASYNC109
+) -> None:
+    """Shut the thread-pool executor down, waiting (bounded) for in-flight sync
+    views so worker threads do not leak. ``executor.shutdown(wait=True)`` blocks,
+    so it runs off the loop and is itself bounded by the grace period."""
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: executor.shutdown(wait=True)),  # type: ignore[attr-defined]
+            timeout=timeout,
+        )
+    except TimeoutError:
+        # A sync view outlived the grace period; drop the wait so we still exit.
+        executor.shutdown(wait=False)  # type: ignore[attr-defined]
 
 
 def _serve_target(target: str, host: str, port: int, workers: int | None, settings: str | None) -> None:

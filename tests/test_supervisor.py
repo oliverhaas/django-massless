@@ -4,9 +4,10 @@ the spawned worker actually re-imported and ran the target). Bounded waits + a
 finally-shutdown so no test leaks orphan processes or hangs."""
 
 import multiprocessing as mp
+import signal
 
 import pytest
-from supervisor_targets import ready_then_sleep
+from supervisor_targets import ignore_sigterm_then_sleep, ready_then_sleep
 
 from massless.supervisor import Supervisor
 
@@ -93,4 +94,24 @@ def test_reap_does_not_restart_during_shutdown(spawn_ctx):
     sup.shutdown()
     # After shutdown, a monitor step must NOT spawn new workers.
     sup._reap_and_restart()
+    assert sup._workers == []
+
+
+def test_shutdown_force_kills_worker_that_ignores_sigterm(spawn_ctx):
+    # A hung worker that ignores SIGTERM (the graceful-stop signal) must still be
+    # stopped: the supervisor escalates to SIGKILL. Short join_timeout so the
+    # SIGTERM grace lapses quickly; bounded so the test never hangs.
+    q = spawn_ctx.Queue()
+    sup = Supervisor(ignore_sigterm_then_sleep, args=(q,), n=1, ctx=spawn_ctx, join_timeout=0.5)
+    sup.start()
+    assert len(_drain_ready(q, 1)) == 1
+    proc = sup._workers[0]
+    assert proc.is_alive()
+
+    sup.shutdown()
+
+    # SIGTERM was ignored, so only SIGKILL could have stopped it.
+    assert not proc.is_alive()
+    # SIGKILL surfaces as a negative exitcode equal to -SIGKILL.
+    assert proc.exitcode == -signal.SIGKILL
     assert sup._workers == []

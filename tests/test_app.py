@@ -73,6 +73,29 @@ def test_route_is_async_flag():
     assert routes["/s"].is_async is False
 
 
+def test_bridge_with_sync_view_rejected_at_registration():
+    import pytest
+
+    api = MasslessAPI()
+
+    with pytest.raises(ValueError, match="bridge"):
+
+        @api.get("/b", bridge=True)
+        def sync_bridged():  # a sync (def) view cannot be awaited by the bridge
+            return {}
+
+
+def test_bridge_with_async_view_allowed():
+    api = MasslessAPI()
+
+    @api.get("/b", bridge=True)
+    async def async_bridged():
+        return {}
+
+    rid = api.build_router().match(b"/b")[0]
+    assert api.routes[rid].bridge is True
+
+
 def test_startup_shutdown_hook_registries():
     api = MasslessAPI()
 

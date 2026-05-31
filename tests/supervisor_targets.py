@@ -23,3 +23,13 @@ def ready_then_sleep(ready_queue):
     ready_queue.put(os.getpid())
     while True:
         time.sleep(0.05)
+
+
+def ignore_sigterm_then_sleep(ready_queue):
+    """A hung worker that IGNORES SIGTERM (the graceful-stop signal), so the
+    supervisor's escalation must use SIGKILL to actually stop it. Signals the
+    parent once running, then sleeps forever. ``ready_queue`` is a mp Queue."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    ready_queue.put(os.getpid())
+    while True:
+        time.sleep(0.05)

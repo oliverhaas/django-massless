@@ -139,3 +139,147 @@ async def _drain_scenario():
     assert data.endswith(b'{"ok":true}')
     # The in-flight view finished before the shutdown hook ran.
     assert events == ["view_done", "shutdown"]
+
+
+def test_inflight_request_gets_200_when_server_stops_alongside_idle_connection():
+    asyncio.run(asyncio.wait_for(_inflight_not_cancelled_scenario(), timeout=10))
+
+
+async def _inflight_not_cancelled_scenario():
+    """An in-flight request (view awaiting ~0.3s) that STARTED before shutdown must
+    finish with its 200 rather than being cancelled, even while a second, idle
+    keep-alive connection lingers (whose worker loop must not be mistaken for
+    in-flight work and must not stall the drain)."""
+    api = MasslessAPI()
+    started = asyncio.Event()
+
+    @api.get("/slow")
+    async def slow():
+        started.set()
+        await asyncio.sleep(0.3)
+        return {"ok": True}
+
+    @api.get("/quick")
+    async def quick():
+        return {"quick": True}
+
+    ready = asyncio.Event()
+    stop = asyncio.Event()
+    sock = _make_socket("127.0.0.1", 0)
+    host, port = sock.getsockname()
+
+    task = asyncio.create_task(
+        serve_async(api, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=2.0),
+    )
+    await asyncio.wait_for(ready.wait(), timeout=5)
+
+    # An idle keep-alive connection: one quick request, response read, kept open.
+    idle_reader, idle_writer = await asyncio.open_connection(host, port)
+    idle_writer.write(b"GET /quick HTTP/1.1\r\nHost: x\r\n\r\n")
+    await idle_writer.drain()
+    idle_data = await asyncio.wait_for(_read_http_response(idle_reader), timeout=5)
+    assert idle_data.endswith(b'{"quick":true}')
+
+    # A second connection with an in-flight slow request.
+    reader, writer = await asyncio.open_connection(host, port)
+    writer.write(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
+    await writer.drain()
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    # Stop while /slow is mid-response and the idle connection is still open.
+    stop.set()
+
+    # The in-flight request still completes with a 200 (not cancelled).
+    data = await asyncio.wait_for(_read_http_response(reader), timeout=5)
+    assert data.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert data.endswith(b'{"ok":true}')
+
+    # And the whole serve task winds down within the overall bound (the idle
+    # keep-alive worker loop must not stall the drain to its full timeout).
+    await asyncio.wait_for(task, timeout=8)
+    writer.close()
+    idle_writer.close()
+
+
+def test_drain_does_not_hang_on_idle_keepalive_connection():
+    asyncio.run(asyncio.wait_for(_idle_drain_scenario(), timeout=10))
+
+
+async def _idle_drain_scenario():
+    """A drain with no in-flight request work must finish promptly even with an
+    open idle keep-alive connection: the per-connection worker loop (blocked on
+    its queue) is NOT in-flight work and must not burn the full drain timeout."""
+    import time
+
+    api = MasslessAPI()
+
+    @api.get("/quick")
+    async def quick():
+        return {"quick": True}
+
+    ready = asyncio.Event()
+    stop = asyncio.Event()
+    sock = _make_socket("127.0.0.1", 0)
+    host, port = sock.getsockname()
+
+    # A generous drain timeout: if the idle worker loop is mistaken for in-flight
+    # work, shutdown would take ~this long. We assert it finishes much faster.
+    task = asyncio.create_task(
+        serve_async(api, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=5.0),
+    )
+    await asyncio.wait_for(ready.wait(), timeout=5)
+
+    reader, writer = await asyncio.open_connection(host, port)
+    writer.write(b"GET /quick HTTP/1.1\r\nHost: x\r\n\r\n")
+    await writer.drain()
+    data = await asyncio.wait_for(_read_http_response(reader), timeout=5)
+    assert data.endswith(b'{"quick":true}')
+
+    # Connection stays open (keep-alive). Trigger shutdown; it must be prompt.
+    t0 = time.monotonic()
+    stop.set()
+    await asyncio.wait_for(task, timeout=5)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, f"drain took {elapsed:.2f}s; idle keep-alive stalled it"
+    writer.close()
+
+
+def test_executor_is_shut_down_after_graceful_stop():
+    asyncio.run(asyncio.wait_for(_executor_shutdown_scenario(), timeout=10))
+
+
+async def _executor_shutdown_scenario():
+    """After a graceful stop, the sync-view ThreadPoolExecutor (if one was built)
+    is shut down with its threads joined, so they do not leak across restarts."""
+    api = MasslessAPI()
+
+    @api.get("/sync")
+    def sync_view():
+        return {"ok": True}
+
+    ready = asyncio.Event()
+    stop = asyncio.Event()
+    sock = _make_socket("127.0.0.1", 0)
+    host, port = sock.getsockname()
+
+    task = asyncio.create_task(
+        serve_async(api, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=2.0),
+    )
+    await asyncio.wait_for(ready.wait(), timeout=5)
+
+    # One sync request builds and uses the executor.
+    data = await asyncio.wait_for(_http_get(host, port, b"/sync"), timeout=5)
+    assert data.endswith(b'{"ok":true}')
+    executor = api.executor
+    assert executor is not None, "sync view should have built the executor"
+
+    stop.set()
+    await asyncio.wait_for(task, timeout=8)
+
+    # The executor was shut down: submitting new work now raises.
+    import pytest
+
+    with pytest.raises(RuntimeError):
+        executor.submit(lambda: None)
+    # And its worker threads have been joined (none left running).
+    assert not any(t.is_alive() for t in getattr(executor, "_threads", set()))
