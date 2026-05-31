@@ -23,5 +23,6 @@ src/massless/**/*.c
 src/massless/**/*.cpp
 src/massless/**/*.html
 
-# Benchmark output
-benchmarks/results/
+# Benchmark output: raw run.sh reports are ephemeral; keep the curated summary.
+benchmarks/results/*
+!benchmarks/results/PHASE1.md
