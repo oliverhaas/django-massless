@@ -63,7 +63,7 @@ src/massless/
   __main__.py        # python -m massless module:api --host --port
   _protocol.pyx      # asyncio.Protocol on uvloop, feeds bytes to httptools
   _router.pyx        # static C hash map + dynamic int-param matcher (nogil)
-  _request.pyx       # cdef class MasslessRequest(HttpRequest), fast path only
+  _request.pyx       # cdef RequestCore (C storage) + MasslessRequest(HttpRequest) wrapper
   _response.pyx      # C response builder; msgspec/bytes/str body paths
   _router.pxd        # cimport surface for the router
   _request.pxd       # cimport surface for MasslessRequest
@@ -79,9 +79,10 @@ Each `.pyx` is a small, well-bounded unit with one purpose, testable on its own.
 ```
 TCP accept (uvloop)
   -> _protocol.pyx feeds bytes to httptools (llhttp)
-  -> httptools callbacks fill MasslessRequest C fields           [no Python objects]
+  -> httptools callbacks fill a RequestCore's C fields           [no Python objects]
      (method, path, query bytes, header map)
   -> _router.pyx matches path bytes, captures int param          [nogil]
+  -> at dispatch: wrap RequestCore in a MasslessRequest          [the one Python object]
   -> per-route binder builds view kwargs (path int + query str)
   -> await async view(**kwargs)                                  [the one Python crossing]
   -> view returns dict/list  -> msgspec.json.encode
@@ -112,16 +113,23 @@ objects touched during match. A miss returns a sentinel that the protocol turns
 into a 404.
 
 ### 5.3 `_request.pyx`
-`cdef class MasslessRequest(HttpRequest)` with C fields for method, path, raw query
-bytes, body bytes, and a header map. It does NOT call `HttpRequest.__init__`. The
-fast-path surface is:
-- `method`, `path` (from C fields),
-- `path_params` (captured by the router),
-- query access (parsed from the raw query bytes on demand),
-- `get_header(name)` (from the C header map).
+Two coupled units. A `cdef class` cannot inherit from `HttpRequest` (a pure-Python
+class), so the C storage and the `HttpRequest` subclass are separated:
 
-No `__getattr__` or promotion in Phase 1. Touching a Django-machinery attribute
-raises `AttributeError`, which is the behavior the no-promotion test asserts.
+- **`cdef class RequestCore`**: owns the C fields (method, path, raw query bytes, body
+  bytes, header map). Filled by the protocol during parse, potentially `nogil` for the
+  pure-byte work. Exposes the fast-path surface as Cython properties / `cpdef` methods:
+  `method`, `path`, query access (parsed from raw query bytes on demand), and
+  `get_header(name)`. Private `cdef` fields are invisible to Python, so the surface must
+  go through these accessors.
+- **`class MasslessRequest(HttpRequest)`**: a regular Python class, materialized only at
+  view dispatch, wrapping a `RequestCore` plus the router-captured `path_params`. Its
+  fast-path attributes delegate to the core. It does NOT call `HttpRequest.__init__`, so
+  Django-machinery attributes are absent.
+
+No `__getattr__` or promotion in Phase 1. Touching a Django-machinery attribute raises
+`AttributeError`, which is the behavior the no-promotion test asserts. (The separation
+and these three behaviors were verified against Cython 3.2.5 and Django 6.0.)
 
 ### 5.4 View and param binding
 At registration the view signature is inspected once to build a per-route binder.

@@ -67,7 +67,7 @@ Legend: **[reuse]** existing library · **[build]** we write it.
 | 2 | HTTP parser | **[reuse]** | httptools (Cython bindings to `llhttp`). Handles HTTP/1.1 state, keep-alive, chunked. |
 | 3 | Connection/protocol layer | **[build]** | Cython `asyncio.Protocol` feeding bytes to httptools. Backpressure, pipelining. |
 | 4 | Multi-process acceptor | **[build]** | `SO_REUSEPORT` across processes (bolt-shaped). |
-| 5 | `MasslessRequest` | **[build]** | `cdef class MasslessRequest(HttpRequest)`. C storage plus lazy promotion. **Keystone.** |
+| 5 | `MasslessRequest` | **[build]** | Regular `HttpRequest` subclass wrapping a `cdef RequestCore` (a cdef class cannot subclass a pure-Python class). C storage plus lazy promotion. **Keystone.** |
 | 6 | Router | **[build]** | Radix/trie on path bytes, static-vs-dynamic split, `nogil`. |
 | 7 | Middleware chain (tiered) | **[build]** | Fast cdef tier plus bridge to real Django middleware. |
 | 8 | Auth | **[build]** | JWT/HMAC/API-key on raw bytes via bound C crypto (OpenSSL/libsodium), `nogil`. |
@@ -86,21 +86,31 @@ Legend: **[reuse]** existing library · **[build]** we write it.
 
 ### Mechanism (Approach A: subclass plus `__getattr__` interception)
 
+`MasslessRequest` is a **regular Python class** that subclasses `HttpRequest`, backed
+by a held `cdef class RequestCore` that owns the C storage. It cannot itself be a
+`cdef class`: a Cython extension type cannot inherit from a pure-Python class such as
+`HttpRequest` (verified: `First base of 'MasslessRequest' is not an extension type`).
+Composition keeps every property Approach A needs (`isinstance`, lazy `__getattr__`
+promotion, C-speed storage, `nogil`-fillable buffers) while compiling cleanly.
+
 ```python
-cdef class MasslessRequest(HttpRequest):
-    cdef bytes _method, _path, _body
+cdef class RequestCore:           # C storage, nogil-fillable during parse/route
+    cdef bytes _method, _path, _query, _body
     cdef object _headers          # C/C++ header map
     cdef dict _path_params
-    cdef bint _is_django          # the one-way latch
-
-    # FAST PATH (served from C, never promotes):
-    #   method, path, path params, get_header(b'...')
+    # fast-path surface exposed as Cython properties / cpdef:
+    #   method, path, path params, get_header(b'...')  -- served from C, never promotes
     #   ported Cython middleware use ONLY this surface
+
+class MasslessRequest(HttpRequest):   # regular Python subclass; isinstance passes
+    # Built only at view dispatch, wrapping a RequestCore. Does NOT call
+    # HttpRequest.__init__, so Django-machinery attrs are absent until promotion.
+    _is_django = False            # the one-way latch
 
     def __getattr__(self, name):  # Python calls this ONLY when normal lookup fails
         if not self._is_django:
             self._promote()       # reconstruct META / GET / POST / body / COOKIES
-            self._is_django = True # ... from the C buffers, ONCE, all at once
+            self._is_django = True # ... from the core's C buffers, ONCE, all at once
         return getattr(self, name)
 ```
 
@@ -108,11 +118,11 @@ cdef class MasslessRequest(HttpRequest):
 - We **do not call `HttpRequest.__init__`** at construction, so Django's machinery
   attributes (`GET`, `POST`, `FILES`, `body`, `META`, `COOKIES`, `user`, `session`,
   `encoding`) are *absent*. `__getattr__` fires only on the first miss, then promotes.
-- `isinstance(request, HttpRequest)` passes (we subclass it), so Django views and
-  middleware accept the object unmodified.
+- `isinstance(request, HttpRequest)` passes (the wrapper subclasses it), so Django views
+  and middleware accept the object unmodified.
 - **Fast-path attrs never promote.** `method`, `path`, path params, and `get_header()`
-  are served from C fields. Ported Cython middleware use only this C API, so they stay
-  `nogil` and never trip the latch. Only Django-land code touching `.META`/`.GET`/`.user`
+  are served from the `RequestCore` C fields. Ported Cython middleware use only this C API,
+  so they stay `nogil` and never trip the latch. Only Django-land code touching `.META`/`.GET`/`.user`
   promotes.
 - Promotion is **lazy, one-shot, all-at-once.** After `_promote()`, the real attributes
   exist, so `__getattr__` no longer fires for them.
