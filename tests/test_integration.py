@@ -79,3 +79,32 @@ def test_path_and_query(server):
     status, body = _get(server + "/items/12345?q=hello")
     assert status == 200
     assert body == b'{"item_id":12345,"q":"hello"}'
+
+
+def test_no_promotion_on_fast_path(server):
+    from massless._request import MasslessRequest
+
+    created = []
+    orig_init = MasslessRequest.__init__
+
+    def spy_init(self, core, path_params):
+        created.append(self)
+        orig_init(self, core, path_params)
+
+    MasslessRequest.__init__ = spy_init
+    try:
+        _get(server + "/")
+        _get(server + "/items/12345?q=hello")
+        import time
+
+        time.sleep(0.2)  # let the response tasks finish
+    finally:
+        MasslessRequest.__init__ = orig_init
+
+    assert created, "expected requests to be served via MasslessRequest"
+    for req in created:
+        # No promotion: the latch attribute was never set, and Django state was never
+        # materialized (touching .GET still raises, as on a pristine fast-path request).
+        assert not hasattr(req, "_is_django")
+        with pytest.raises(AttributeError):
+            _ = req.GET
