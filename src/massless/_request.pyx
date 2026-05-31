@@ -1,5 +1,7 @@
 from urllib.parse import parse_qs
 
+from django.http import HttpRequest
+
 
 cdef class RequestCore:
     @staticmethod
@@ -39,3 +41,21 @@ cdef class RequestCore:
             self._query_cache = parse_qs(self._query.decode("latin1"))
         values = self._query_cache.get(name)
         return values[0] if values else None
+
+
+class MasslessRequest(HttpRequest):
+    """Regular HttpRequest subclass backed by a RequestCore. No HttpRequest.__init__
+    call, so Django-machinery attrs are absent until promotion (Phase 2)."""
+
+    def __init__(self, core, path_params):
+        self._core = core
+        self.path_params = path_params
+
+    method = property(lambda self: self._core.method)
+    path = property(lambda self: self._core.path)
+
+    def get_header(self, name):
+        return self._core.get_header(name)
+
+    def query_param(self, name):
+        return self._core.query_param(name)
