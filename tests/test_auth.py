@@ -91,3 +91,37 @@ def test_injected_clock_for_exp():
     assert valid.before(_req_with_auth(token)) is None
     expired = JWTAuth(secret=secret, now=lambda: 2500.0)
     assert expired.before(_req_with_auth(token)).status == 401
+
+
+def test_alg_none_rejected_401():
+    # alg-confusion / alg:none bypass: a token declaring "none" must be rejected
+    # before any signature handling.
+    secret = "s"
+    token = make_jwt({"sub": "42", "exp": time.time() + 3600}, secret, alg="none")
+    assert JWTAuth(secret=secret).before(_req_with_auth(token)).status == 401
+
+
+def test_alg_confusion_hs512_rejected_401():
+    # Only HS256 is accepted; a different HMAC alg must be rejected even if the
+    # attacker correctly HMAC'd with the secret (the header alg must match).
+    secret = "s"
+    token = make_jwt({"sub": "42", "exp": time.time() + 3600}, secret, alg="HS512")
+    assert JWTAuth(secret=secret).before(_req_with_auth(token)).status == 401
+
+
+def test_future_nbf_rejected_401():
+    secret = "s"
+    token = make_jwt({"sub": "1", "exp": 5000, "nbf": 3000}, secret)
+    # now=2000 is before nbf=3000 -> not yet valid.
+    assert JWTAuth(secret=secret, now=lambda: 2000.0).before(_req_with_auth(token)).status == 401
+    # now=3500 is after nbf and before exp -> valid.
+    assert JWTAuth(secret=secret, now=lambda: 3500.0).before(_req_with_auth(token)) is None
+
+
+def test_missing_exp_is_accepted():
+    # Documented policy: a token with no `exp` does not expire (matches common JWT libs).
+    secret = "s"
+    token = make_jwt({"sub": "7"}, secret)
+    req = _req_with_auth(token)
+    assert JWTAuth(secret=secret).before(req) is None
+    assert req.auth["sub"] == "7"

@@ -87,8 +87,9 @@ cdef Response _wrap_result(object result):
     return Response.from_view_result(result)
 
 
-cdef bytes _django_response_to_bytes(object dj_resp, bint keep_alive):
-    """Serialize a Django HttpResponse (from the bridge) to HTTP/1.1 bytes."""
+cdef Response _django_response_to_massless(object dj_resp):
+    """Fold a Django HttpResponse (from the bridge) into a massless Response, so the
+    fast-tier after() hooks run uniformly on the bridge path too."""
     cdef int status = dj_resp.status_code
     cdef bytes body = dj_resp.content
     cdef object ctype = dj_resp.headers.get("Content-Type", "application/octet-stream")
@@ -100,7 +101,7 @@ cdef bytes _django_response_to_bytes(object dj_resp, bint keep_alive):
         if name.lower() == "content-type" or name.lower() == "content-length":
             continue
         resp.headers[name] = value
-    return resp.to_bytes(keep_alive)
+    return resp
 
 
 async def dispatch(api, core, int route_id, long param):
@@ -130,7 +131,10 @@ async def dispatch(api, core, int route_id, long param):
         request._promote()
         handler = _get_bridge(api)
         dj_resp = await handler.run(request, route.view, kwargs)
-        return _django_response_to_bytes(dj_resp, True)
+        resp = _django_response_to_massless(dj_resp)
+        if chain:
+            run_after(chain, request, resp)
+        return resp.to_bytes(True)
 
     result = await route.view(**kwargs)
     resp = _wrap_result(result)

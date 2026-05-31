@@ -99,3 +99,31 @@ def test_bridge_with_auth_middleware_sets_request_user():
     assert resp["X-Bridge"] == "1"
     # request.user is now set (lazy AnonymousUser) without raising.
     assert req.user is not None
+
+
+@override_settings(MIDDLEWARE=["tests.bridge_mw.AddHeaderMiddleware"])
+def test_bridge_path_runs_fast_tier_after_hooks():
+    # A bridged route that is ALSO CORS-wrapped must still get the fast-tier after()
+    # response headers (after() runs uniformly on the bridge path, not just the
+    # fast path). Exercises dispatch end-to-end for a bridge=True route.
+    from massless._middleware import CORS
+    from massless._protocol import dispatch
+
+    from massless.app import MasslessAPI
+
+    api = MasslessAPI()
+
+    @api.get("/b", middleware=[CORS(allow_origins=["https://ex.com"])], bridge=True)
+    async def view():
+        return {"ok": True}
+
+    core = RequestCore.py_create(
+        b"GET",
+        b"/b",
+        b"",
+        [(b"host", b"ex.com"), (b"origin", b"https://ex.com")],
+        b"",
+    )
+    raw = asyncio.run(dispatch(api, core, 0, -1))
+    assert b"X-Bridge: 1" in raw  # the Django middleware ran (bridge promoted + chained)
+    assert b"Access-Control-Allow-Origin: https://ex.com" in raw  # fast-tier after() ran on the bridge path

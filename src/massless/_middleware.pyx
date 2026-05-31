@@ -202,8 +202,12 @@ cdef class JWTAuth(Middleware):
         if not hmac.compare_digest(expected, provided):
             raise AuthError("signature mismatch")
         cdef dict claims = msgspec.json.decode(_b64url_decode(p_b64))
+        cdef object now = self._now()
+        cdef object nbf = claims.get("nbf")
+        if nbf is not None and float(nbf) > now:
+            raise AuthError("not yet valid")
         cdef object exp = claims.get("exp")
-        if exp is not None and float(exp) < self._now():
+        if exp is not None and float(exp) < now:
             raise AuthError("expired")
         return claims
 
