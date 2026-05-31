@@ -19,4 +19,5 @@ def test_register_and_compile_static_and_dynamic():
     # The compiled route exposes its view and binder by id.
     route = api.routes[rid]
     assert route.view is item
-    assert route.binder({"item_id": 12345}, lambda n: "x")["item_id"] == 12345
+    # binder contract: binder(request, path_params, query_getter) -> kwargs.
+    assert route.binder(None, {"item_id": 12345}, lambda n: "x")["item_id"] == 12345

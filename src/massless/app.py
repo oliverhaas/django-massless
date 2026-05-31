@@ -15,19 +15,23 @@ if TYPE_CHECKING:
 _PARAM_RE = re.compile(r"^(?P<prefix>/[^{}]*/)\{(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)\}$")
 
 
-def build_binder(view: Callable) -> Callable[[dict, Callable], dict]:
-    """Inspect a view signature and return binder(path_params, query_getter) -> kwargs.
+def build_binder(view: Callable) -> Callable[[object, dict, Callable], dict]:
+    """Inspect a view signature and return binder(request, path_params, query_getter) -> kwargs.
 
-    Path params present in path_params are coerced by annotation (int -> int).
-    Remaining params are read from query_getter(name); missing optionals become None.
+    A parameter named ``request`` is bound to the injected request object and is
+    never treated as a path or query param. Path params present in path_params are
+    coerced by annotation (int -> int). Remaining params are read from
+    query_getter(name); missing optionals become None.
     """
     sig = inspect.signature(view)
     params = list(sig.parameters.values())
 
-    def binder(path_params: dict, query_getter: Callable) -> dict:
+    def binder(request: object, path_params: dict, query_getter: Callable) -> dict:
         kwargs: dict = {}
         for p in params:
-            if p.name in path_params:
+            if p.name == "request":
+                kwargs["request"] = request
+            elif p.name in path_params:
                 raw = path_params[p.name]
                 kwargs[p.name] = int(raw) if p.annotation is int else raw
             else:

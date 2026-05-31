@@ -83,7 +83,7 @@ async def dispatch(api, core, int route_id, long param):
     route = api.routes[route_id]
     path_params = {route.param_name: param} if route.param_name is not None else {}
     request = MasslessRequest(core, path_params)
-    kwargs = route.binder(path_params, request.query_param)
+    kwargs = route.binder(request, path_params, request.query_param)
     result = await route.view(**kwargs)
     body, ctype = serialize_body(result)
     return build_http_response(200, ctype, body, True)

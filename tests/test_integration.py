@@ -65,6 +65,12 @@ def server():
     async def item(item_id: int, q: str | None = None):
         return {"item_id": item_id, "q": q}
 
+    @api.get("/whoami")
+    async def whoami(request):
+        # Touches Django state (get_host()), proving request injection drives
+        # promotion through the real pipeline.
+        return {"host": request.get_host(), "method": request.method}
+
     base_url, stop = _serve(api)
     yield base_url
     stop()
@@ -135,6 +141,16 @@ def test_path_and_query(server):
     status, body = _get(server + "/items/12345?q=hello")
     assert status == 200
     assert body == b'{"item_id":12345,"q":"hello"}'
+
+
+def test_request_injection_and_promotion_end_to_end(server):
+    # A view declaring `request` receives the injected MasslessRequest and
+    # promotes when it touches a Django attr (get_host()), end-to-end over the
+    # real server. The Host header is "127.0.0.1:<port>" for urllib requests.
+    host = server.removeprefix("http://")
+    status, body = _get(server + "/whoami")
+    assert status == 200
+    assert body == f'{{"host":"{host}","method":"GET"}}'.encode()
 
 
 def test_no_promotion_on_fast_path(server):
