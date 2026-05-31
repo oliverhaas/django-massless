@@ -15,6 +15,25 @@ CASES = [
     ),
     (b"POST", b"/api", b"", [(b"host", b"ex.com"), (b"content-type", b"application/json")], b'{"a":1}'),
     (b"GET", b"/", b"", [(b"host", b"ex.com:8080"), (b"cookie", b"sid=abc; theme=dark")], b""),
+    # charset in Content-Type fires WSGIRequest's encoding setter (-> del self.GET)
+    # inside __init__; without the GET deleter this 500s. Non-ASCII body proves the
+    # charset is actually applied when decoding the form.
+    (
+        b"POST",
+        b"/charset-form",
+        b"",
+        [(b"host", b"ex.com"), (b"content-type", b"application/x-www-form-urlencoded; charset=utf-8")],
+        b"name=%C3%A9&x=1",
+    ),
+    (
+        b"POST",
+        b"/charset-json",
+        b"",
+        [(b"host", b"ex.com"), (b"content-type", b"application/json; charset=utf-8")],
+        b'{"a":1}',
+    ),
+    # non-ASCII percent-encoded query string
+    (b"GET", b"/q", b"q=caf%C3%A9", [(b"host", b"ex.com")], b""),
 ]
 
 

@@ -100,7 +100,7 @@ class MasslessRequest(WSGIRequest):
             if n == "content-type":
                 environ["CONTENT_TYPE"] = v
             elif n == "content-length":
-                environ["CONTENT_LENGTH"] = v
+                pass  # CONTENT_LENGTH is derived from the actual body length, not the client header
             else:
                 environ["HTTP_" + n.upper().replace("-", "_")] = v
             if n == "host":
@@ -168,6 +168,16 @@ class MasslessRequest(WSGIRequest):
             self.__dict__["_get_cache"] = cached
         return cached
 
+    @GET.deleter
+    def GET(self):
+        # Django's encoding setter does `del self.GET` to force a re-decode. Our GET
+        # override is a data-descriptor property (no instance-dict entry to delete),
+        # so drop our private cache instead; the next access recomputes with the new
+        # encoding. Without this deleter, `self.encoding = charset` (fired inside
+        # WSGIRequest.__init__ for any Content-Type with a charset param) raises and
+        # aborts promotion.
+        self.__dict__.pop("_get_cache", None)
+
     @property
     def POST(self):
         self._ensure_promoted()
@@ -181,6 +191,12 @@ class MasslessRequest(WSGIRequest):
             cached = WSGIRequest.__dict__["COOKIES"].func(self)
             self.__dict__["_cookies_cache"] = cached
         return cached
+
+    @COOKIES.deleter
+    def COOKIES(self):
+        # Defensive symmetry with GET: drop our private cache so any `del self.COOKIES`
+        # cannot raise on the data-descriptor property.
+        self.__dict__.pop("_cookies_cache", None)
 
     @property
     def FILES(self):
@@ -219,3 +235,9 @@ class MasslessRequest(WSGIRequest):
     def __iter__(self):
         self._ensure_promoted()
         return HttpRequest.__iter__(self)
+
+    def close(self):
+        # Closing an un-promoted request is a no-op: there are no upload handlers or
+        # streams to release until promotion, so don't force promotion just to close.
+        if self._is_django:
+            HttpRequest.close(self)
