@@ -2,7 +2,7 @@ import asyncio
 
 from massless._protocol import dispatch, parse_request
 
-from massless.app import MasslessAPI
+from massless.handler import MasslessHandler
 
 
 def test_parse_get_request_to_core():
@@ -14,21 +14,9 @@ def test_parse_get_request_to_core():
     assert core.get_header("x-test") == "val"
 
 
-def _api():
-    api = MasslessAPI()
-
-    @api.get("/items/{item_id}")
-    async def item(item_id: int, q: str | None = None):
-        return {"item_id": item_id, "q": q}
-
-    return api
-
-
-def test_dispatch_runs_view_and_builds_response():
-    api = _api()
-    router = api.build_router()
+def test_dispatch_runs_request_through_handler():
     core = parse_request(b"GET /items/7?q=hi HTTP/1.1\r\nHost: x\r\n\r\n")
-    route_id, param = router.match(b"/items/7")
-    raw = asyncio.run(dispatch(api, core, route_id, param))
+    handler = MasslessHandler()
+    raw = asyncio.run(dispatch(handler, core))
     assert raw.startswith(b"HTTP/1.1 200 OK\r\n")
-    assert raw.endswith(b'{"item_id":7,"q":"hi"}')
+    assert b'"item_id": 7' in raw

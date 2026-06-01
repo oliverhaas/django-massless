@@ -1,7 +1,5 @@
-"""High-performance Django API framework with a Cython request pipeline that
-defers Django object materialization until touched.
+"""Drop-in, high-performance server and request pipeline for an unmodified Django
+project: a Cython HTTP parse + uvloop transport feeds a lazy Django request through
+Django's real URL resolver and middleware chain, deferring Django object
+materialization until a handler touches it.
 """
-
-from massless.app import MasslessAPI
-
-__all__ = ["MasslessAPI"]

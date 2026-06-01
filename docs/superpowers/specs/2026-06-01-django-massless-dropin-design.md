@@ -51,8 +51,21 @@ view, all in Python, so the speedup is **bounded** by that Python cost; it is no
    invasive and a fidelity risk.)
 4. **Pivot, reusing the engine.** Keep the C engine; retire the bolt-style surface.
 5. **django-ninja works unchanged** (it is Django views plugged into `urls.py`).
-6. **ASGI-flavored, sync views via the thread-pool.** No separate WSGI mode. Streaming
-   responses (`StreamingHttpResponse`/SSE) are a later phase.
+6. **ASGI-flavored; sync views via Django's own adaptation.** No separate WSGI mode, and
+   no massless-specific executor: Django's async chain runs sync views via
+   `sync_to_async(thread_sensitive=True)` (one shared thread, serialized, matching
+   uvicorn+Django). Streaming responses (`StreamingHttpResponse`/SSE) are a later phase;
+   until then massless answers a streaming response with a clear `501`.
+
+**Phase 1 reality check (measured):** with the *full default `MIDDLEWARE`*, stock
+middleware (`SecurityMiddleware`/`CommonMiddleware`) reads `get_host()`/`is_secure()`,
+which promotes the lazy request before the view, so the lazy-construction win (#1) is
+mostly gone there. But the C parse, the request built directly from C buffers (no ASGI
+scope round-trip), and C response serialization are still a large win on their own:
+**measured ~3.3x vs uvicorn+Django on the full default stack, widening to ~5.5x on lean
+middleware** where the request stays lazy (`benchmarks/results/DROPIN-PHASE1.md`). The
+earlier prediction of a near-parity default path was too pessimistic. `MIDDLEWARE_STACKS`
+(Phase 2) is the lever that unlocks the lean-stack case for hot routes.
 7. **Benchmarks pivot** to massless vs uvicorn+Django and massless vs uvicorn+ninja on
    the same app (plus the existing bolt/plain-Django context).
 
@@ -64,7 +77,8 @@ TCP (SO_REUSEPORT) -> uvloop -> Cython protocol -> httptools parse
   -> Django URL resolver (ROOT_URLCONF) on request.path_info  -> view + args/kwargs + the route's stack
   -> run the selected MIDDLEWARE stack (BaseHandler onion) around the view, with the lazy request
        async view -> awaited on the loop
-       sync view  -> run in the thread-pool executor (blocking ORM safe)
+       sync view  -> adapted by Django's chain via sync_to_async(thread_sensitive=True)
+                     (one shared executor thread, blocking ORM safe; parity with uvicorn+Django)
   -> view returns HttpResponse  -> C-serialize (status line, headers, Set-Cookie, body) -> socket
 ```
 

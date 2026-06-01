@@ -71,6 +71,9 @@ class MasslessRequest(WSGIRequest):
         self.path_params = path_params
         self.method = core.method
         self.path = core.path
+        # Django's URL resolver reads request.path_info first; expose it as a plain
+        # attr so resolution does not trigger promotion (it is just the path).
+        self.path_info = core.path
         self._is_django = False
         # Fast-tier auth claims, set as a plain instance attribute. Present from
         # construction so reading/writing request.auth never triggers __getattr__
