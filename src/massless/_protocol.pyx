@@ -116,7 +116,19 @@ async def dispatch(handler, core):
     """
     request = MasslessRequest(core, {})
     dj_resp = await handler.handle(request)
-    cdef Response resp = _django_response_to_massless(dj_resp)
+    cdef Response resp
+    if getattr(dj_resp, "streaming", False):
+        # Streaming responses are a later phase (the C serializer reads .content, which
+        # a StreamingHttpResponse does not have). Return a clear 501 instead of letting
+        # the missing .content surface as an opaque 500.
+        _logger.warning("streaming responses are not supported yet (path=%s)", request.path)
+        resp = Response(501, {}, b"Streaming responses are not supported yet", b"text/plain; charset=utf-8")
+    else:
+        resp = _django_response_to_massless(dj_resp)
+    # Run the Django response's resource closers (fires request_finished and closes
+    # per-request resources, e.g. DB connections and temp upload files), as Django's
+    # own WSGI/ASGI handlers do after the response is produced.
+    dj_resp.close()
     return resp.to_bytes(True)
 
 

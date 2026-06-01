@@ -1,6 +1,11 @@
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.urls import path
 from django.views import View
+
+
+def stream(request):
+    # Streaming is not supported until a later phase; massless returns a clear 501.
+    return StreamingHttpResponse(iter([b"a", b"b"]))
 
 
 async def hello(request):
@@ -75,4 +80,5 @@ urlpatterns = [
     path("slow/<int:item_id>", slow_id),
     path("fast/<int:item_id>", fast_id),
     path("sync-json", sync_ok),
+    path("stream", stream),
 ]

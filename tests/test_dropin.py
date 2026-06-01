@@ -95,3 +95,31 @@ def test_responses_match_django_test_client(server):
     dj_sync = client.get("/sync", HTTP_HOST="testserver")
     assert msl_status == dj_sync.status_code
     assert msl_body == dj_sync.content
+
+
+def test_streaming_response_returns_clear_501(server):
+    # Streaming is a later phase; massless must return a clear 501, not an opaque 500
+    # from the serializer hitting a StreamingHttpResponse (which has no .content).
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _get(server + "/stream")
+    assert e.value.code == 501
+
+
+def test_request_finished_signal_fires(server):
+    # FIDELITY: the Django response is closed after serializing, so request_finished
+    # fires and per-request resources (DB connections, temp files) are released, as
+    # under Django's own handlers.
+    from django.core.signals import request_finished
+
+    fired = []
+
+    def receiver(**kwargs):
+        fired.append(True)
+
+    request_finished.connect(receiver)
+    try:
+        _get(server + "/sync")
+        time.sleep(0.2)  # let the response task finish on the server loop
+    finally:
+        request_finished.disconnect(receiver)
+    assert fired, "request_finished should fire after the response is served"
