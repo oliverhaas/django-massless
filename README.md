@@ -59,16 +59,25 @@ built earlier.
 | 3 | django-ninja example + the benchmark pivot (massless vs uvicorn+Django / uvicorn+ninja on the same app). | planned |
 | 4 | Streaming responses (`StreamingHttpResponse`/SSE), optional WSGI mode. | later |
 
-## Honesty about performance
+## Performance
 
-A full-fidelity drop-in runs Django's resolver, your whole `MIDDLEWARE`, and your view
-(all Python), so the default-path speedup is **bounded** by that cost. With the full
-stock middleware the lazy request is promoted before the view anyway, so Phase 1's gain
-over uvicorn+Django is mostly the C parse + transport. The real lever is per-route lean
-stacks (`MIDDLEWARE_STACKS`, Phase 2). The benchmark harness in
-[`benchmarks/`](benchmarks/) compares against uvicorn+Django honestly; results land with
-Phase 3. (The earlier `PHASE1-4.md` numbers measured the now-retired bolt-style engine,
-not the drop-in.)
+Serving the **same unmodified Django app** (4 workers, saturating load), massless is
+**~3.3x faster than uvicorn+Django on the full default middleware stack** and **~5.5x on
+lean middleware**, while returning byte-identical responses
+([`benchmarks/results/DROPIN-PHASE1.md`](benchmarks/results/DROPIN-PHASE1.md)):
+
+| Endpoint | uvicorn+Django | massless | speedup |
+|----------|---------------:|---------:|--------:|
+| `/` (full default stack) | 4,691 | 15,320 | 3.27x |
+| `/` (lean middleware) | 7,686 | 42,804 | 5.57x |
+
+A full-fidelity drop-in still runs Django's resolver, your `MIDDLEWARE`, and your view in
+Python, so the gain is bounded by that. The ~3.3x comes from the C parse, building the
+request directly from C buffers (no ASGI scope round-trip), and C response serialization;
+the lazy request adds the rest on lean routes, which per-route stacks
+(`MIDDLEWARE_STACKS`, Phase 2) will let you opt into. Numbers are first-pass, single-run,
+on loopback. (The earlier `PHASE1-4.md` numbers measured the now-retired bolt-style
+engine, not the drop-in.)
 
 ## License
 

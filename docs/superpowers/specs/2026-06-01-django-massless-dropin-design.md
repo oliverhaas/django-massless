@@ -57,13 +57,15 @@ view, all in Python, so the speedup is **bounded** by that Python cost; it is no
    uvicorn+Django). Streaming responses (`StreamingHttpResponse`/SSE) are a later phase;
    until then massless answers a streaming response with a clear `501`.
 
-**Phase 1 reality check (honest):** with the *full default `MIDDLEWARE`*, stock
+**Phase 1 reality check (measured):** with the *full default `MIDDLEWARE`*, stock
 middleware (`SecurityMiddleware`/`CommonMiddleware`) reads `get_host()`/`is_secure()`,
-which promotes the lazy request before the view runs. So on the default path the
-lazy-construction win (#1 above) is near zero; Phase 1's measurable gain over
-uvicorn+Django is mostly the C parse + transport. The lazy request only pays off once
-`MIDDLEWARE_STACKS` (Phase 2) lets hot routes run lean stacks that never touch
-host/path/`GET`. The Phase 1 benchmark must report this honestly.
+which promotes the lazy request before the view, so the lazy-construction win (#1) is
+mostly gone there. But the C parse, the request built directly from C buffers (no ASGI
+scope round-trip), and C response serialization are still a large win on their own:
+**measured ~3.3x vs uvicorn+Django on the full default stack, widening to ~5.5x on lean
+middleware** where the request stays lazy (`benchmarks/results/DROPIN-PHASE1.md`). The
+earlier prediction of a near-parity default path was too pessimistic. `MIDDLEWARE_STACKS`
+(Phase 2) is the lever that unlocks the lean-stack case for hot routes.
 7. **Benchmarks pivot** to massless vs uvicorn+Django and massless vs uvicorn+ninja on
    the same app (plus the existing bolt/plain-Django context).
 
