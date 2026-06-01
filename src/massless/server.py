@@ -22,7 +22,7 @@ from massless._protocol import MasslessProtocol
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from massless.app import MasslessAPI
+    from massless.handler import MasslessHandler
 
 _logger = logging.getLogger("massless")
 
@@ -53,7 +53,7 @@ async def _run_hooks(hooks: list[Callable[[], Awaitable | None]]) -> None:
 
 
 async def serve_async(  # noqa: PLR0913
-    api: MasslessAPI,
+    handler: MasslessHandler,
     host: str,
     port: int,
     *,
@@ -73,17 +73,17 @@ async def serve_async(  # noqa: PLR0913
         stop = asyncio.Event()
 
     # Reset per-serve drain state and bind the drain event to this loop.
-    api._draining = False  # noqa: SLF001
-    api._drain_event = asyncio.Event()  # noqa: SLF001
+    handler._draining = False  # noqa: SLF001
+    handler._drain_event = asyncio.Event()  # noqa: SLF001
 
-    await _run_hooks(api.on_startup_hooks)
+    await _run_hooks(handler.on_startup_hooks)
 
     owns_sock = sock is None
     if sock is None:
         sock = _make_socket(host, port)
 
     loop = asyncio.get_running_loop()
-    server = await loop.create_server(lambda: MasslessProtocol(api, api.build_router()), sock=sock)
+    server = await loop.create_server(lambda: MasslessProtocol(handler), sock=sock)
     try:
         if ready is not None:
             ready.set()
@@ -94,42 +94,42 @@ async def serve_async(  # noqa: PLR0913
         # Signal connections to wind down BEFORE waiting on the server: on 3.12+
         # ``wait_closed`` blocks until active connections finish, and idle
         # keep-alive loops only exit once the drain event is set.
-        api.begin_drain()
+        handler.begin_drain()
         # Wait (bounded) for in-flight request work to finish -- only real
         # requests, not idle keep-alive loops.
-        await _drain(api, timeout=drain_timeout)
+        await _drain(handler, timeout=drain_timeout)
         # Connections whose worker loops have exited will close; bound the wait so
         # a wedged peer cannot hang shutdown past the grace period.
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(server.wait_closed(), timeout=drain_timeout)
         if owns_sock:
             sock.close()
-        await _run_hooks(api.on_shutdown_hooks)
+        await _run_hooks(handler.on_shutdown_hooks)
         # Shut the sync-view executor down last, waiting (bounded) for any
         # in-flight sync views (e.g. slow ORM calls) so threads do not leak.
-        executor = getattr(api, "executor", None)
+        executor = getattr(handler, "executor", None)
         if executor is not None:
             await _shutdown_executor(loop, executor, timeout=drain_timeout)
 
 
-async def _drain(api: MasslessAPI, *, timeout: float) -> None:  # noqa: ASYNC109
+async def _drain(handler: MasslessHandler, *, timeout: float) -> None:  # noqa: ASYNC109
     """Wait (bounded) for outstanding in-flight request work to finish.
 
-    ``api._inflight`` holds one future per request currently being handled; each
-    resolves when its response is produced. We await the snapshot, then re-check
-    for late arrivals (pipelined behind an in-flight request) until either the
-    set is empty or the grace period elapses, then cancel any stragglers.
+    ``handler._inflight`` holds one future per request currently being handled;
+    each resolves when its response is produced. We await the snapshot, then
+    re-check for late arrivals (pipelined behind an in-flight request) until either
+    the set is empty or the grace period elapses, then cancel any stragglers.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    while api._inflight:  # noqa: SLF001
+    while handler._inflight:  # noqa: SLF001
         remaining = deadline - loop.time()
         if remaining <= 0:
             break
-        pending = set(api._inflight)  # noqa: SLF001
+        pending = set(handler._inflight)  # noqa: SLF001
         await asyncio.wait(pending, timeout=remaining)
     # Past the grace period: cancel any request futures still outstanding.
-    for fut in list(api._inflight):  # noqa: SLF001
+    for fut in list(handler._inflight):  # noqa: SLF001
         if not fut.done():
             fut.cancel()
 
@@ -153,9 +153,9 @@ async def _shutdown_executor(
         executor.shutdown(wait=False)  # type: ignore[attr-defined]
 
 
-def _serve_target(target: str, host: str, port: int, workers: int | None, settings: str | None) -> None:
-    """Worker entry point (runs in a spawned process): re-bootstrap Django,
-    re-import the app, and serve.
+def _serve_target(host: str, port: int, workers: int | None, settings: str | None) -> None:
+    """Worker entry point (runs in a spawned process): re-bootstrap Django, build a
+    fresh handler from the configured settings, and serve.
 
     This lives in ``massless.server`` (NOT ``massless.__main__``) on purpose:
     ``multiprocessing`` with the spawn start method pickles the target by its
@@ -163,20 +163,21 @@ def _serve_target(target: str, host: str, port: int, workers: int | None, settin
     ``python -m massless`` makes ``massless.__main__`` become) cannot be unpickled
     in the spawned child. A real submodule like this one always re-imports cleanly.
     """
-    from massless.__main__ import _bootstrap_django, load_app  # noqa: PLC0415
+    from massless.__main__ import _bootstrap_django  # noqa: PLC0415
+    from massless.handler import MasslessHandler  # noqa: PLC0415
 
     _bootstrap_django(settings)
-    api = load_app(target)
-    serve(api, host, port, workers)
+    handler = MasslessHandler()
+    serve(handler, host, port, workers)
 
 
-def serve(api: MasslessAPI, host: str, port: int, workers: int | None = None) -> None:
+def serve(handler: MasslessHandler, host: str, port: int, workers: int | None = None) -> None:
     """Run a single worker under uvloop with SIGTERM/SIGINT graceful shutdown.
 
     ``workers`` sets the sync-view executor's ``max_workers`` (thread count).
     """
     if workers is not None:
-        api._max_workers = workers  # noqa: SLF001
+        handler._max_workers = workers  # noqa: SLF001
 
     async def _main() -> None:
         stop = asyncio.Event()
@@ -187,6 +188,6 @@ def serve(api: MasslessAPI, host: str, port: int, workers: int | None = None) ->
             except (NotImplementedError, ValueError):
                 # Signal handlers are unavailable off the main thread; ignore.
                 _logger.debug("could not install handler for %s", sig)
-        await serve_async(api, host, port, stop=stop)
+        await serve_async(handler, host, port, stop=stop)
 
     uvloop.run(_main())

@@ -1,18 +1,12 @@
 import asyncio
 import contextlib
-import functools
 import logging
-import traceback
-from concurrent.futures import ThreadPoolExecutor
 
 import httptools
-
-from django.conf import settings
 
 _logger = logging.getLogger("massless")
 
 from massless._request cimport RequestCore
-from massless._middleware cimport run_after, run_before
 from massless._request import MasslessRequest
 from massless._response cimport Response
 from massless._response import build_http_response
@@ -89,16 +83,10 @@ def parse_request(bytes raw):
     return RequestCore.create(method, path, query, headers, body)
 
 
-cdef Response _wrap_result(object result):
-    """Fold a view return value into a Response (200), unless it already is one."""
-    if isinstance(result, Response):
-        return <Response>result
-    return Response.from_view_result(result)
-
-
 cdef Response _django_response_to_massless(object dj_resp):
-    """Fold a Django HttpResponse (from the bridge) into a massless Response, so the
-    fast-tier after() hooks run uniformly on the bridge path too."""
+    """Fold a Django HttpResponse into a massless Response for the C serializer:
+    status, headers (minus Content-Type/Length, set explicitly), and each
+    Set-Cookie line so logins/sessions/CSRF survive."""
     cdef int status = dj_resp.status_code
     cdef bytes body = dj_resp.content
     cdef object ctype = dj_resp.headers.get("Content-Type", "application/octet-stream")
@@ -111,96 +99,25 @@ cdef Response _django_response_to_massless(object dj_resp):
             continue
         resp.headers[name] = value
     # Django keeps cookies in .cookies (a SimpleCookie), separate from .headers.
-    # Emit each as its own Set-Cookie line so logins/sessions/CSRF survive the bridge.
     cdef object morsel
     for morsel in dj_resp.cookies.values():
         resp.cookies.append(morsel.OutputString())
     return resp
 
 
-async def dispatch(api, core, int route_id, long param):
-    """Run the matched view through the fast-tier middleware and return full
-    HTTP response bytes.
+async def dispatch(handler, core):
+    """Build a lazy MasslessRequest from the C buffers, run it through Django's
+    real middleware chain + resolver + view (the handler), and serialize the
+    Django response to HTTP/1.1 wire bytes.
 
-    Flow: build request -> run_before (short-circuit on a Response) -> if
-    bridge: promote + run through Django's real middleware chain -> else call
-    the view -> wrap the return in a Response -> run_after (reverse) -> serialize.
+    Sync (def) views are adapted by Django's own async middleware chain (via
+    sync_to_async, thread-sensitive), so no separate executor branch is needed
+    here; async views are awaited on the loop.
     """
-    route = api.routes[route_id]
-    path_params = {route.param_name: param} if route.param_name is not None else {}
-    request = MasslessRequest(core, path_params)
-
-    cdef list chain = route.middleware
-    cdef object short = run_before(chain, request) if chain else None
-    cdef Response resp
-    if short is not None:
-        resp = <Response>short
-        if chain:
-            run_after(chain, request, resp)
-        return resp.to_bytes(True)
-
-    kwargs = route.binder(request, path_params, request.query_param)
-
-    try:
-        if route.bridge:
-            request._promote()
-            handler = _get_bridge(api)
-            dj_resp = await handler.run(request, route.view, kwargs)
-            resp = _django_response_to_massless(dj_resp)
-        elif route.is_async:
-            result = await route.view(**kwargs)
-            resp = _wrap_result(result)
-        else:
-            # Sync (def) view: run off the loop thread on the thread-pool executor,
-            # where blocking work (including the Django ORM) is safe.
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                _get_executor(api), functools.partial(route.view, **kwargs)
-            )
-            resp = _wrap_result(result)
-    except Exception:
-        _logger.exception("view error")
-        resp = _error_response()
-    if chain:
-        run_after(chain, request, resp)
+    request = MasslessRequest(core, {})
+    dj_resp = await handler.handle(request)
+    cdef Response resp = _django_response_to_massless(dj_resp)
     return resp.to_bytes(True)
-
-
-cdef Response _error_response():
-    """Build a 500 Response. In DEBUG the body carries the traceback; otherwise a
-    generic message. Guards ``settings.configured`` so fast-path-only apps without
-    Django settings still produce a clean 500."""
-    cdef bytes body
-    if settings.configured and settings.DEBUG:
-        body = traceback.format_exc().encode("utf-8", "replace")
-    else:
-        body = b"Internal Server Error"
-    return Response(500, {}, body, b"text/plain; charset=utf-8")
-
-
-cdef object _get_executor(api):
-    """Lazily build and cache the ThreadPoolExecutor on the api (once per process).
-
-    Sync (def) views run here via ``loop.run_in_executor`` so their blocking work
-    (including the Django ORM) stays off the loop thread. ``api._max_workers`` (set
-    by the runner from ``--workers``) overrides the default pool size.
-    """
-    executor = getattr(api, "executor", None)
-    if executor is None:
-        max_workers = getattr(api, "_max_workers", None)
-        executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="massless")
-        api.executor = executor
-    return executor
-
-
-cdef object _get_bridge(api):
-    """Lazily build and cache the BridgeHandler on the api (once per process)."""
-    handler = getattr(api, "_bridge_handler", None)
-    if handler is None:
-        from massless.bridge import BridgeHandler
-        handler = BridgeHandler()
-        api._bridge_handler = handler
-    return handler
 
 
 class MasslessProtocol(asyncio.Protocol):
@@ -213,12 +130,12 @@ class MasslessProtocol(asyncio.Protocol):
     order), and all pipelined requests in one buffer are served in order.
 
     Different connections each get their own protocol instance and worker task,
-    so they still run concurrently.
+    so they still run concurrently. The shared per-worker lifecycle state
+    (in-flight registry, drain latch + event) lives on the handler.
     """
 
-    def __init__(self, api, router):
-        self._api = api
-        self._router = router
+    def __init__(self, handler):
+        self._handler = handler
         self._transport = None
         self._collector = _Collector()
         self._parser = httptools.HttpRequestParser(self._collector)
@@ -236,7 +153,7 @@ class MasslessProtocol(asyncio.Protocol):
         # loop exits on its own once its queue is idle (see _process_loop). Outside
         # a drain (e.g. a client drops a keep-alive connection), cancel promptly to
         # free the blocked ``queue.get()``.
-        if self._worker is not None and not self._api._draining:
+        if self._worker is not None and not self._handler._draining:
             self._worker.cancel()
             self._worker = None
         self._transport = None
@@ -247,18 +164,17 @@ class MasslessProtocol(asyncio.Protocol):
             parsed = httptools.parse_url(url)
             query = parsed.query if parsed.query is not None else b""
             core = RequestCore.create(method, parsed.path, query, headers, body)
-            route_id, param = self._router.match(parsed.path)
-            self._queue.put_nowait((core, route_id, param))
+            self._queue.put_nowait((core,))
 
     async def _process_loop(self):
         loop = asyncio.get_running_loop()
-        inflight = self._api._inflight
+        inflight = self._handler._inflight
         try:
             while True:
                 # If a drain has begun and this connection has no queued work,
                 # close the connection and stop so it is neither mistaken for
                 # in-flight work nor left holding the server open via wait_closed.
-                if self._api._draining and self._queue.empty():
+                if self._handler._draining and self._queue.empty():
                     self._close_transport()
                     return
                 item = await self._next_item()
@@ -266,24 +182,20 @@ class MasslessProtocol(asyncio.Protocol):
                     # Woken by the drain with no queued work: close + exit cleanly.
                     self._close_transport()
                     return
-                core, route_id, param = item
+                (core,) = item
                 # Mark this one request as in-flight for the duration of handling
                 # it, so the server's graceful drain can await real request work
                 # (and only real request work) before running shutdown hooks.
                 done = loop.create_future()
                 inflight.add(done)
                 try:
-                    if route_id == -1:
+                    try:
+                        raw = await dispatch(self._handler, core)
+                    except Exception:
+                        _logger.exception("request error")
                         raw = build_http_response(
-                            404, b"text/plain; charset=utf-8", b"Not Found", True
+                            500, b"text/plain; charset=utf-8", b"Internal Server Error", True
                         )
-                    else:
-                        try:
-                            raw = await dispatch(self._api, core, route_id, param)
-                        except Exception:
-                            raw = build_http_response(
-                                500, b"text/plain; charset=utf-8", b"Internal Server Error", True
-                            )
                     if self._transport is not None and not self._transport.is_closing():
                         self._transport.write(raw)
                 finally:
@@ -301,8 +213,8 @@ class MasslessProtocol(asyncio.Protocol):
             self._transport.close()
 
     async def _next_item(self):
-        """Return the next queued (core, route_id, param), or ``None`` if a drain
-        wakes an idle connection that has nothing queued.
+        """Return the next queued (core,), or ``None`` if a drain wakes an idle
+        connection that has nothing queued.
 
         We race ``queue.get()`` against the shared drain event so an idle
         keep-alive worker loop, otherwise blocked here forever, exits promptly
@@ -311,10 +223,10 @@ class MasslessProtocol(asyncio.Protocol):
         loop = asyncio.get_running_loop()
         # The drain event is normally created by serve_async; create one lazily
         # for serving paths (e.g. tests) that drive the protocol directly.
-        if self._api._drain_event is None:
-            self._api._drain_event = asyncio.Event()
+        if self._handler._drain_event is None:
+            self._handler._drain_event = asyncio.Event()
         get_task = loop.create_task(self._queue.get())
-        drain_wait = loop.create_task(self._api._drain_event.wait())
+        drain_wait = loop.create_task(self._handler._drain_event.wait())
         try:
             await asyncio.wait(
                 {get_task, drain_wait}, return_when=asyncio.FIRST_COMPLETED

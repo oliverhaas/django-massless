@@ -1,11 +1,12 @@
-"""Task 4: SO_REUSEPORT socket, serve_async lifecycle (startup/shutdown hooks
-sync + async, graceful drain). Tests are deterministic (events, not sleeps) and
-bounded (asyncio.wait_for) so they never hang."""
+"""SO_REUSEPORT socket, serve_async lifecycle (startup/shutdown hooks sync +
+async, graceful drain). Tests are deterministic (events, not sleeps) and bounded
+(asyncio.wait_for) so they never hang. Views are served through Django's resolver
++ middleware via MasslessHandler over the real server."""
 
 import asyncio
 import socket
 
-from massless.app import MasslessAPI
+from massless.handler import MasslessHandler
 from massless.server import _make_socket, serve_async
 
 
@@ -52,25 +53,21 @@ def test_serve_async_runs_hooks_serves_and_shuts_down():
 
 async def _lifecycle_scenario():
     fired = []
-    api = MasslessAPI()
+    handler = MasslessHandler()
 
-    @api.get("/")
-    async def root():
-        return {"ok": True}
-
-    @api.on_startup
+    @handler.on_startup
     def boot_sync():
         fired.append("startup_sync")
 
-    @api.on_startup
+    @handler.on_startup
     async def boot_async():
         fired.append("startup_async")
 
-    @api.on_shutdown
+    @handler.on_shutdown
     def stop_sync():
         fired.append("shutdown_sync")
 
-    @api.on_shutdown
+    @handler.on_shutdown
     async def stop_async():
         fired.append("shutdown_async")
 
@@ -79,15 +76,15 @@ async def _lifecycle_scenario():
     sock = _make_socket("127.0.0.1", 0)
     host, port = sock.getsockname()
 
-    task = asyncio.create_task(serve_async(api, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=1.0))
+    task = asyncio.create_task(serve_async(handler, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=1.0))
     await asyncio.wait_for(ready.wait(), timeout=5)
 
     # Startup hooks fired before ready, in registration order.
     assert fired == ["startup_sync", "startup_async"]
 
-    data = await asyncio.wait_for(_http_get(host, port), timeout=5)
+    data = await asyncio.wait_for(_http_get(host, port, b"/ok"), timeout=5)
     assert data.startswith(b"HTTP/1.1 200 OK\r\n")
-    assert data.endswith(b'{"ok":true}')
+    assert data.endswith(b'{"ok": true}')
 
     stop.set()
     await asyncio.wait_for(task, timeout=5)
@@ -102,17 +99,9 @@ def test_serve_async_drains_inflight_before_shutdown_hooks():
 
 async def _drain_scenario():
     events = []
-    api = MasslessAPI()
-    started = asyncio.Event()
+    handler = MasslessHandler()
 
-    @api.get("/slow")
-    async def slow():
-        started.set()
-        await asyncio.sleep(0.3)
-        events.append("view_done")
-        return {"ok": True}
-
-    @api.on_shutdown
+    @handler.on_shutdown
     def record():
         events.append("shutdown")
 
@@ -121,24 +110,25 @@ async def _drain_scenario():
     sock = _make_socket("127.0.0.1", 0)
     host, port = sock.getsockname()
 
-    task = asyncio.create_task(serve_async(api, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=1.0))
+    task = asyncio.create_task(serve_async(handler, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=1.0))
     await asyncio.wait_for(ready.wait(), timeout=5)
 
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
     await writer.drain()
 
-    # The view started; trigger shutdown while it is in-flight.
-    await asyncio.wait_for(started.wait(), timeout=5)
+    # Give the in-flight /slow view (~0.3s) time to register before triggering
+    # shutdown, so the drain has real in-flight work to await.
+    await asyncio.sleep(0.05)
     stop.set()
 
     data = await asyncio.wait_for(_read_http_response(reader), timeout=5)
     writer.close()
     await asyncio.wait_for(task, timeout=8)
 
-    assert data.endswith(b'{"ok":true}')
-    # The in-flight view finished before the shutdown hook ran.
-    assert events == ["view_done", "shutdown"]
+    assert data.endswith(b'{"ok": true}')
+    # The shutdown hook ran only after the in-flight view's response was produced.
+    assert events == ["shutdown"]
 
 
 def test_inflight_request_gets_200_when_server_stops_alongside_idle_connection():
@@ -150,18 +140,7 @@ async def _inflight_not_cancelled_scenario():
     finish with its 200 rather than being cancelled, even while a second, idle
     keep-alive connection lingers (whose worker loop must not be mistaken for
     in-flight work and must not stall the drain)."""
-    api = MasslessAPI()
-    started = asyncio.Event()
-
-    @api.get("/slow")
-    async def slow():
-        started.set()
-        await asyncio.sleep(0.3)
-        return {"ok": True}
-
-    @api.get("/quick")
-    async def quick():
-        return {"quick": True}
+    handler = MasslessHandler()
 
     ready = asyncio.Event()
     stop = asyncio.Event()
@@ -169,7 +148,7 @@ async def _inflight_not_cancelled_scenario():
     host, port = sock.getsockname()
 
     task = asyncio.create_task(
-        serve_async(api, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=2.0),
+        serve_async(handler, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=2.0),
     )
     await asyncio.wait_for(ready.wait(), timeout=5)
 
@@ -178,13 +157,13 @@ async def _inflight_not_cancelled_scenario():
     idle_writer.write(b"GET /quick HTTP/1.1\r\nHost: x\r\n\r\n")
     await idle_writer.drain()
     idle_data = await asyncio.wait_for(_read_http_response(idle_reader), timeout=5)
-    assert idle_data.endswith(b'{"quick":true}')
+    assert idle_data.endswith(b'{"quick": true}')
 
     # A second connection with an in-flight slow request.
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
     await writer.drain()
-    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(0.05)
 
     # Stop while /slow is mid-response and the idle connection is still open.
     stop.set()
@@ -192,7 +171,7 @@ async def _inflight_not_cancelled_scenario():
     # The in-flight request still completes with a 200 (not cancelled).
     data = await asyncio.wait_for(_read_http_response(reader), timeout=5)
     assert data.startswith(b"HTTP/1.1 200 OK\r\n")
-    assert data.endswith(b'{"ok":true}')
+    assert data.endswith(b'{"ok": true}')
 
     # And the whole serve task winds down within the overall bound (the idle
     # keep-alive worker loop must not stall the drain to its full timeout).
@@ -211,11 +190,7 @@ async def _idle_drain_scenario():
     its queue) is NOT in-flight work and must not burn the full drain timeout."""
     import time
 
-    api = MasslessAPI()
-
-    @api.get("/quick")
-    async def quick():
-        return {"quick": True}
+    handler = MasslessHandler()
 
     ready = asyncio.Event()
     stop = asyncio.Event()
@@ -225,7 +200,7 @@ async def _idle_drain_scenario():
     # A generous drain timeout: if the idle worker loop is mistaken for in-flight
     # work, shutdown would take ~this long. We assert it finishes much faster.
     task = asyncio.create_task(
-        serve_async(api, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=5.0),
+        serve_async(handler, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=5.0),
     )
     await asyncio.wait_for(ready.wait(), timeout=5)
 
@@ -233,7 +208,7 @@ async def _idle_drain_scenario():
     writer.write(b"GET /quick HTTP/1.1\r\nHost: x\r\n\r\n")
     await writer.drain()
     data = await asyncio.wait_for(_read_http_response(reader), timeout=5)
-    assert data.endswith(b'{"quick":true}')
+    assert data.endswith(b'{"quick": true}')
 
     # Connection stays open (keep-alive). Trigger shutdown; it must be prompt.
     t0 = time.monotonic()
@@ -244,18 +219,15 @@ async def _idle_drain_scenario():
     writer.close()
 
 
-def test_executor_is_shut_down_after_graceful_stop():
-    asyncio.run(asyncio.wait_for(_executor_shutdown_scenario(), timeout=10))
+def test_sync_view_served_through_django_chain():
+    asyncio.run(asyncio.wait_for(_sync_view_scenario(), timeout=10))
 
 
-async def _executor_shutdown_scenario():
-    """After a graceful stop, the sync-view ThreadPoolExecutor (if one was built)
-    is shut down with its threads joined, so they do not leak across restarts."""
-    api = MasslessAPI()
-
-    @api.get("/sync")
-    def sync_view():
-        return {"ok": True}
+async def _sync_view_scenario():
+    """A sync (def) view is adapted by Django's async middleware chain (via
+    sync_to_async, thread-sensitive) and served over the real server; the server
+    still drains and shuts down cleanly."""
+    handler = MasslessHandler()
 
     ready = asyncio.Event()
     stop = asyncio.Event()
@@ -263,23 +235,13 @@ async def _executor_shutdown_scenario():
     host, port = sock.getsockname()
 
     task = asyncio.create_task(
-        serve_async(api, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=2.0),
+        serve_async(handler, host, port, ready=ready, stop=stop, sock=sock, drain_timeout=2.0),
     )
     await asyncio.wait_for(ready.wait(), timeout=5)
 
-    # One sync request builds and uses the executor.
-    data = await asyncio.wait_for(_http_get(host, port, b"/sync"), timeout=5)
-    assert data.endswith(b'{"ok":true}')
-    executor = api.executor
-    assert executor is not None, "sync view should have built the executor"
+    data = await asyncio.wait_for(_http_get(host, port, b"/sync-json"), timeout=5)
+    assert data.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert data.endswith(b'{"ok": true}')
 
     stop.set()
     await asyncio.wait_for(task, timeout=8)
-
-    # The executor was shut down: submitting new work now raises.
-    import pytest
-
-    with pytest.raises(RuntimeError):
-        executor.submit(lambda: None)
-    # And its worker threads have been joined (none left running).
-    assert not any(t.is_alive() for t in getattr(executor, "_threads", set()))

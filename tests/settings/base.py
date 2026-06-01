@@ -27,3 +27,11 @@ DATABASES = {
 }
 
 USE_TZ = True
+
+ROOT_URLCONF = "settings.urls"
+
+# A minimal but representative middleware stack for the drop-in tests.
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.middleware.common.CommonMiddleware",
+]

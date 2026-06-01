@@ -35,6 +35,13 @@ def test_wrapper_delegates_and_is_httprequest():
     assert req.get_header("x-test") == "v"
 
 
+def test_path_info_is_plain_and_does_not_promote():
+    core = RequestCore.py_create(b"GET", b"/items/5", b"", [(b"host", b"ex.com")], b"")
+    req = MasslessRequest(core, {})
+    assert req.path_info == "/items/5"
+    assert req._is_django is False  # reading path_info must not promote
+
+
 def test_wrapper_does_not_promote_on_fast_path():
     core = RequestCore.py_create(b"GET", b"/", b"", [])
     req = MasslessRequest(core, {})
