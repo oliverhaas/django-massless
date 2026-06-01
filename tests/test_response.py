@@ -27,14 +27,13 @@ def test_serialize_bytes_passthrough():
 
 def test_build_http_response_200_keepalive():
     raw = _response.build_http_response(200, b"application/json", b'{"a":1}', True)
-    assert raw == (
-        b"HTTP/1.1 200 OK\r\n"
-        b"Content-Type: application/json\r\n"
-        b"Content-Length: 7\r\n"
-        b"Connection: keep-alive\r\n"
-        b"\r\n"
-        b'{"a":1}'
-    )
+    assert raw.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert b"Content-Type: application/json\r\n" in raw
+    assert b"Content-Length: 7\r\n" in raw
+    # Keep-alive is the HTTP/1.1 default; no Connection header is emitted (uvicorn parity).
+    assert b"Connection:" not in raw
+    assert b"Date: " in raw
+    assert raw.endswith(b"\r\n\r\n" + b'{"a":1}')
 
 
 def test_build_http_response_404_close():
@@ -51,11 +50,16 @@ def test_response_attrs():
     assert resp.body == b"hi"
 
 
+def _strip_date(raw):
+    return b"\r\n".join(line for line in raw.split(b"\r\n") if not line.startswith(b"Date:"))
+
+
 def test_response_to_bytes_matches_build_http_response():
-    # A Response with no extra headers produces the same wire bytes as build_http_response.
+    # A Response with no extra headers produces the same wire bytes as build_http_response
+    # (ignoring the Date header, which is keyed to the wall clock).
     resp = _response.Response(200, {}, b'{"a":1}', b"application/json")
     raw = _response.response_to_bytes(resp, True)
-    assert raw == _response.build_http_response(200, b"application/json", b'{"a":1}', True)
+    assert _strip_date(raw) == _strip_date(_response.build_http_response(200, b"application/json", b'{"a":1}', True))
 
 
 def test_response_to_bytes_appends_headers():

@@ -80,6 +80,8 @@ def test_build_wsgi_environ_maps_core():
         b"q=hi",
         [(b"host", b"example.com:9000"), (b"content-type", b"application/json"), (b"x-test", b"v")],
         b'{"a":1}',
+        None,
+        ("10.0.0.1", 8000),  # local bind address -> SERVER_NAME/SERVER_PORT
     )
     req = MasslessRequest(core, {})
     env = req._build_wsgi_environ()
@@ -89,8 +91,9 @@ def test_build_wsgi_environ_maps_core():
     assert env["CONTENT_TYPE"] == "application/json"
     assert env["CONTENT_LENGTH"] == "7"
     assert env["HTTP_X_TEST"] == "v"
-    assert env["SERVER_NAME"] == "example.com"
-    assert env["SERVER_PORT"] == "9000"
+    assert env["HTTP_HOST"] == "example.com:9000"  # Host header -> HTTP_HOST (get_host)
+    assert env["SERVER_NAME"] == "10.0.0.1"  # SERVER_NAME/PORT come from the bind address
+    assert env["SERVER_PORT"] == "8000"
     assert env["wsgi.input"].read() == b'{"a":1}'
 
 

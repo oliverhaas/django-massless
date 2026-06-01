@@ -55,9 +55,21 @@ built earlier.
 | Phase | Goal | Status |
 |-------|------|--------|
 | 1 | Serve an unmodified Django project: `MasslessHandler` over Django's resolver + `MIDDLEWARE`, lazy request, multi-process, byte-identical responses. | done |
+| 1b | HTTP fidelity hardening: `REMOTE_ADDR` + trusted `X-Forwarded-Proto`/`-For`, header folding + underscore drop, percent-decoded paths, exact reason phrase, HEAD/204/304 framing, `Date`, keep-alive + `Connection: close`, `Expect: 100-continue`, `request_started`/`finished`. | done |
 | 2 | `MIDDLEWARE_STACKS`: named middleware stacks in settings, assignable per route, so hot routes run lean and stay on the fast path. | next |
 | 3 | django-ninja example + the benchmark pivot (massless vs uvicorn+Django / uvicorn+ninja on the same app). | planned |
 | 4 | Streaming responses (`StreamingHttpResponse`/SSE), optional WSGI mode. | later |
+
+### HTTP fidelity
+
+massless aims to behave like the same project under uvicorn+Django. The request (`META`,
+client address, scheme behind a trusted proxy, headers, cookies, percent-decoded path) and
+the response (status line + reason phrase, `Content-Type`/`Content-Length`, `Set-Cookie`,
+`Date`, HEAD/204/304 framing, keep-alive) are matched, and `request_started`/`request_finished`
+fire on the executor thread so DB-connection bookkeeping works. Known gaps: streaming
+responses answer a clear `501` (Phase 4); request bodies are buffered in memory (no
+spool-to-disk for very large uploads); responses use `Content-Length` framing rather than
+chunked.
 
 ## Performance
 

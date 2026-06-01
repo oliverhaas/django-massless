@@ -1,3 +1,7 @@
+import time
+from email.utils import formatdate
+from http import HTTPStatus
+
 import msgspec
 
 
@@ -10,33 +14,48 @@ cpdef tuple serialize_body(object obj):
     return msgspec.json.encode(obj), b"application/json"
 
 
-cdef dict _REASON = {
-    200: b"OK",
-    204: b"No Content",
-    400: b"Bad Request",
-    401: b"Unauthorized",
-    403: b"Forbidden",
-    404: b"Not Found",
-    422: b"Unprocessable Entity",
-    429: b"Too Many Requests",
-    500: b"Internal Server Error",
-}
+# Full IANA reason-phrase table (matches uvicorn's STATUS_LINE / http.client.responses),
+# so a 302/201/405/503 serializes with its real phrase, not a placeholder "OK".
+cdef dict _REASON = {int(s): s.phrase.encode("ascii") for s in HTTPStatus}
+cdef bytes _UNKNOWN_REASON = b"Unknown Status Code"
 
 
-cpdef bytes build_http_response(int status, bytes content_type, bytes body, bint keep_alive):
-    cdef bytes reason = _REASON.get(status, b"OK")
-    cdef bytes conn = b"keep-alive" if keep_alive else b"close"
-    return (
-        b"HTTP/1.1 " + str(status).encode("ascii") + b" " + reason + b"\r\n" +
-        b"Content-Type: " + content_type + b"\r\n" +
-        b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n" +
-        b"Connection: " + conn + b"\r\n\r\n" +
-        body
-    )
+# RFC 7231 Date header, refreshed at most once per wall-clock second (as uvicorn does in
+# Server.on_tick) so the formatdate cost is amortized across every request in that second.
+cdef bytes _date_value = b""
+cdef long _date_epoch = -1
+
+
+cdef bytes _http_date():
+    global _date_value, _date_epoch
+    cdef long now = <long>time.time()
+    if now != _date_epoch:
+        _date_value = formatdate(now, usegmt=True).encode("ascii")
+        _date_epoch = now
+    return _date_value
+
+
+cpdef bytes build_http_response(int status, bytes content_type, bytes body, bint keep_alive, bytes method=b"GET"):
+    cdef bytes reason = _REASON.get(status, _UNKNOWN_REASON)
+    cdef bint is_head = method == b"HEAD"
+    cdef bint bodyless = status == 204 or status == 304
+    cdef list parts = [b"HTTP/1.1 " + str(status).encode("ascii") + b" " + reason + b"\r\n"]
+    if content_type:
+        parts.append(b"Content-Type: " + content_type + b"\r\n")
+    parts.append(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n")
+    if not keep_alive:
+        # Keep-alive is the HTTP/1.1 default and emitted implicitly (uvicorn parity); only
+        # an explicit close is signalled on the wire.
+        parts.append(b"Connection: close\r\n")
+    parts.append(b"Date: " + _http_date() + b"\r\n")
+    parts.append(b"\r\n")
+    if not is_head and not bodyless:
+        parts.append(body)
+    return b"".join(parts)
 
 
 cpdef bytes reason_phrase(int status):
-    return _REASON.get(status, b"OK")
+    return _REASON.get(status, _UNKNOWN_REASON)
 
 
 cdef class Response:
@@ -51,7 +70,7 @@ cdef class Response:
     """
 
     def __init__(self, int status, dict headers=None, bytes body=b"",
-                 bytes content_type=b"application/octet-stream"):
+                 bytes content_type=b"application/octet-stream", bytes reason=b""):
         self.status = status
         self.headers = dict(headers) if headers is not None else {}
         # Set-Cookie cannot live in `headers` (a dict can't hold repeats); the
@@ -59,6 +78,11 @@ cdef class Response:
         self.cookies = []
         self.body = body if body is not None else b""
         self.content_type = content_type
+        self.reason = reason
+        # Whether the source carried a Content-Type at all. A truthy content_type
+        # implies present; the bridge sets this True for a present-but-empty type so
+        # to_bytes can tell it apart from a genuinely absent one (e.g. a 304).
+        self.ct_present = bool(content_type)
 
     @staticmethod
     def from_view_result(object obj):
@@ -68,16 +92,33 @@ cdef class Response:
         body, ctype = serialize_body(obj)
         return Response(200, {}, body, ctype)
 
-    cpdef bytes to_bytes(self, bint keep_alive):
-        """Serialize to HTTP/1.1 wire bytes, appending any extra headers."""
-        cdef bytes reason = _REASON.get(self.status, b"OK")
-        cdef bytes conn = b"keep-alive" if keep_alive else b"close"
-        cdef list parts = [
-            b"HTTP/1.1 " + str(self.status).encode("ascii") + b" " + reason + b"\r\n",
-            b"Content-Type: " + self.content_type + b"\r\n",
-            b"Content-Length: " + str(len(self.body)).encode("ascii") + b"\r\n",
-            b"Connection: " + conn + b"\r\n",
-        ]
+    cpdef bytes to_bytes(self, bint keep_alive, bytes method=b"GET"):
+        """Serialize to HTTP/1.1 wire bytes, appending any extra headers.
+
+        Honors HEAD (headers only, no body), 204/304 (no Content-Length/body, and 304
+        carries no Content-Type), the exact Django reason phrase, an implicit-keep-alive
+        Connection policy, and a once-per-second Date header.
+        """
+        cdef bytes reason = self.reason if self.reason else _REASON.get(self.status, _UNKNOWN_REASON)
+        cdef bint is_head = method == b"HEAD"
+        # 204/304 carry no message body. Django's CommonMiddleware still sets
+        # Content-Length: 0 on them and uvicorn forwards it, so emit it too; only the
+        # body bytes (and, for 304, Content-Type) are suppressed.
+        cdef bint bodyless = self.status == 204 or self.status == 304
+        cdef list parts = [b"HTTP/1.1 " + str(self.status).encode("ascii") + b" " + reason + b"\r\n"]
+        if self.content_type or self.ct_present:
+            parts.append(b"Content-Type: " + self.content_type + b"\r\n")
+        parts.append(b"Content-Length: " + str(len(self.body)).encode("ascii") + b"\r\n")
+        if not keep_alive:
+            parts.append(b"Connection: close\r\n")
+        cdef str key
+        cdef bint has_date = False
+        for key in self.headers:
+            if key.lower() == "date":
+                has_date = True
+                break
+        if not has_date:
+            parts.append(b"Date: " + _http_date() + b"\r\n")
         cdef str name
         cdef object value
         for name, value in self.headers.items():
@@ -86,7 +127,8 @@ cdef class Response:
         for cookie in self.cookies:
             parts.append(b"Set-Cookie: " + str(cookie).encode("latin1") + b"\r\n")
         parts.append(b"\r\n")
-        parts.append(self.body)
+        if not is_head and not bodyless:
+            parts.append(self.body)
         return b"".join(parts)
 
 

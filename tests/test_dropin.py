@@ -11,6 +11,8 @@ import urllib.request
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("allow_db_connection_management")
+
 
 @pytest.fixture
 def server():

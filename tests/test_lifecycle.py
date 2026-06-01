@@ -6,8 +6,12 @@ async, graceful drain). Tests are deterministic (events, not sleeps) and bounded
 import asyncio
 import socket
 
+import pytest
+
 from massless.handler import MasslessHandler
 from massless.server import _make_socket, serve_async
+
+pytestmark = pytest.mark.usefixtures("allow_db_connection_management")
 
 
 def test_make_socket_sets_reuseport_and_two_can_bind_same_port():

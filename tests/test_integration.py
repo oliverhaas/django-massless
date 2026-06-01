@@ -13,6 +13,8 @@ import pytest
 
 from massless.handler import MasslessHandler
 
+pytestmark = pytest.mark.usefixtures("allow_db_connection_management")
+
 
 def _serve(handler):
     """Start `handler` on an ephemeral port in a background uvloop thread.

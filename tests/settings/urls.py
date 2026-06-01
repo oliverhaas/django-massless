@@ -1,4 +1,10 @@
-from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
+from django.http import (
+    HttpResponse,
+    HttpResponseNotModified,
+    HttpResponseRedirect,
+    JsonResponse,
+    StreamingHttpResponse,
+)
 from django.urls import path
 from django.views import View
 
@@ -6,6 +12,44 @@ from django.views import View
 def stream(request):
     # Streaming is not supported until a later phase; massless returns a clear 501.
     return StreamingHttpResponse(iter([b"a", b"b"]))
+
+
+async def remote_info(request):
+    # Surfaces the client/scheme fidelity bits for end-to-end parity assertions.
+    return JsonResponse(
+        {
+            "remote_addr": request.META.get("REMOTE_ADDR"),
+            "remote_port": request.META.get("REMOTE_PORT"),
+            "scheme": request.scheme,
+            "secure": request.is_secure(),
+        },
+    )
+
+
+def cafe(request):
+    # Non-ASCII route: only resolves if the path was percent-decoded as UTF-8.
+    return JsonResponse({"path": request.path})
+
+
+def redirect_view(request):
+    return HttpResponseRedirect("/")
+
+
+def created(request):
+    return HttpResponse(b"made", status=201)
+
+
+def no_content(request):
+    return HttpResponse(status=204)
+
+
+def not_modified(request):
+    return HttpResponseNotModified()
+
+
+def empty_ct(request):
+    # A present-but-empty Content-Type (Django keeps it), distinct from a 304's absent one.
+    return HttpResponse(b"x", content_type="")
 
 
 async def hello(request):
@@ -81,4 +125,11 @@ urlpatterns = [
     path("fast/<int:item_id>", fast_id),
     path("sync-json", sync_ok),
     path("stream", stream),
+    path("remote", remote_info),
+    path("café/", cafe),
+    path("redirect", redirect_view),
+    path("created", created),
+    path("no-content", no_content),
+    path("not-modified", not_modified),
+    path("empty-ct", empty_ct),
 ]

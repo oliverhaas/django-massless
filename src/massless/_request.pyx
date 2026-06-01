@@ -1,13 +1,15 @@
 import io
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote, unquote_to_bytes
 
 from django.http import HttpRequest
 from django.core.handlers.wsgi import WSGIRequest
 
+from massless._proxy import forwarded_overrides
+
 
 cdef class RequestCore:
     @staticmethod
-    cdef RequestCore create(bytes method, bytes path, bytes query, list headers, bytes body):
+    cdef RequestCore create(bytes method, bytes path, bytes query, list headers, bytes body, tuple client=None, tuple server=None):
         cdef RequestCore c = RequestCore.__new__(RequestCore)
         c._method = method
         c._path = path
@@ -15,12 +17,14 @@ cdef class RequestCore:
         c._headers = [(name.lower(), value) for name, value in headers]
         c._body = body if body is not None else b""
         c._query_cache = None
+        c._client = client
+        c._server = server
         return c
 
     @staticmethod
-    def py_create(bytes method, bytes path, bytes query, list headers, bytes body=b""):
+    def py_create(bytes method, bytes path, bytes query, list headers, bytes body=b"", tuple client=None, tuple server=None):
         # Python-callable wrapper for tests.
-        return RequestCore.create(method, path, query, headers, body)
+        return RequestCore.create(method, path, query, headers, body, client, server)
 
     @property
     def method(self):
@@ -28,7 +32,29 @@ cdef class RequestCore:
 
     @property
     def path(self):
-        return self._path.decode("latin1")
+        # Percent-decoded Unicode path, matching the ASGI scope["path"] uvicorn hands
+        # Django (so the URL resolver sees the same value). The raw path is ASCII; a
+        # latin1 decode never fails, and unquote then decodes the escapes as UTF-8.
+        cdef str raw = self._path.decode("latin1")
+        return unquote(raw) if "%" in raw else raw
+
+    @property
+    def wsgi_path(self):
+        # PATH_INFO for the promoted WSGIRequest. Django's get_path_info re-encodes
+        # this latin1 and decodes UTF-8, so it must be the percent-decoded bytes read
+        # as latin1 (the WSGI convention), not the clean Unicode str.
+        cdef str raw = self._path.decode("latin1")
+        if "%" not in raw:
+            return raw
+        return unquote_to_bytes(raw).decode("latin1")
+
+    @property
+    def client(self):
+        return self._client
+
+    @property
+    def server(self):
+        return self._server
 
     @property
     def body(self):
@@ -154,30 +180,62 @@ class MasslessRequest(WSGIRequest):
         core = self._core
         body = core.body
         headers = core.headers_list()  # list[tuple[bytes, bytes]] lower-cased
-        host = b""
         environ = {
             "REQUEST_METHOD": self.method,
-            "PATH_INFO": self.path,
+            "PATH_INFO": core.wsgi_path,
             "QUERY_STRING": core.query_string(),
             "SERVER_PROTOCOL": "HTTP/1.1",
             "wsgi.input": io.BytesIO(body),
             "wsgi.url_scheme": "http",
             "CONTENT_LENGTH": str(len(body)),
         }
+        # Fold headers into META the way Django's ASGIRequest does (asgi.py): drop names
+        # containing "_" (the underscore/hyphen spoofing guard), join repeats of the same
+        # header with "," and Cookie with "; ". CONTENT_LENGTH stays derived from the
+        # actual body length, not the client-sent header.
+        collected = {}  # HTTP_* / CONTENT_TYPE name -> list[str]
         for name, value in headers:
             n = name.decode("latin1")
+            if "_" in n:
+                continue
             v = value.decode("latin1")
             if n == "content-type":
-                environ["CONTENT_TYPE"] = v
+                key = "CONTENT_TYPE"
             elif n == "content-length":
-                pass  # CONTENT_LENGTH is derived from the actual body length, not the client header
+                continue
             else:
-                environ["HTTP_" + n.upper().replace("-", "_")] = v
-            if n == "host":
-                host = value
-        server_name, _, server_port = host.decode("latin1").partition(":")
-        environ["SERVER_NAME"] = server_name or "localhost"
-        environ["SERVER_PORT"] = server_port or "80"
+                key = "HTTP_" + n.upper().replace("-", "_")
+            if key == "HTTP_COOKIE":
+                v = v.rstrip("; ")
+            collected.setdefault(key, []).append(v)
+        cookies = collected.pop("HTTP_COOKIE", None)
+        if cookies is not None:
+            environ["HTTP_COOKIE"] = "; ".join(cookies)
+        for key, values in collected.items():
+            environ[key] = ",".join(values)
+        # SERVER_NAME/SERVER_PORT come from the local bind address (Django's
+        # scope["server"]), not the Host header (which is HTTP_HOST / get_host()).
+        server = core.server
+        if server is not None:
+            environ["SERVER_NAME"] = str(server[0])
+            environ["SERVER_PORT"] = str(server[1])
+        else:
+            environ["SERVER_NAME"] = "unknown"
+            environ["SERVER_PORT"] = "0"
+        # Client address + scheme. Like Django (REMOTE_ADDR from scope["client"]) and
+        # uvicorn's default proxy-header handling: honor a single X-Forwarded-Proto /
+        # X-Forwarded-For only from a trusted peer; otherwise use the direct peer.
+        client = core.client
+        if client is not None:
+            remote_host, remote_port = client[0], client[1]
+            scheme, forwarded_client = forwarded_overrides(remote_host, headers)
+            if scheme is not None:
+                environ["wsgi.url_scheme"] = scheme
+            if forwarded_client is not None:
+                remote_host, remote_port = forwarded_client
+            environ["REMOTE_ADDR"] = str(remote_host)
+            environ["REMOTE_HOST"] = str(remote_host)
+            environ["REMOTE_PORT"] = str(remote_port)
         return environ
 
     def _ensure_promoted(self):
