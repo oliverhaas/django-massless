@@ -61,31 +61,30 @@ against postgres + Toxiproxy, single-core, full 7-middleware stack, tells the re
 
 | scenario | massless[django] | massless[django-asyncio] | granian-RSGI + fork |
 |---|--:|--:|--:|
-| io (50 ms sleep, c=100) | 916 | **1,795** | 1,791 |
-| db (1-row, 1 ms latency, c=100) | 488 | **broken** | 1,667 |
-| db_heavy (16-lookup prefetch, 5 ms, c=50) | 12.5 | **broken** | 39.8 |
+| io (50 ms sleep, c=100) | 916 | **1,909** | 1,791 |
+| db (1-row, 1 ms latency, c=100) | 488 | **1,788** | 1,667 |
+| db_heavy (16-lookup prefetch, 5 ms, c=50) | 12.5 | hangs* | 39.8 |
 
-Two findings, and the second corrects the headline above:
+1. **Middleware/framework.** On `io` (async view + full middleware under load)
+   `massless[django-asyncio]` hits 1,909 rps, matching granian+fork (1,791) and ~2x
+   `massless[django]` (916). The fork's native-async middleware removes the single-thread
+   executor bottleneck the stock `MiddlewareMixin` `sync_to_async` tax creates, and massless
+   benefits fully.
 
-1. **Middleware/framework: the combination works.** On `io` (async view + full middleware
-   under load) `massless[django-asyncio]` hits 1,795 rps, matching granian+fork (1,791) and
-   nearly 2x `massless[django]` (916). The fork's native-async middleware removes the
-   single-thread executor bottleneck that the stock `MiddlewareMixin` `sync_to_async` tax
-   creates, and massless benefits fully.
-
-2. **Async ORM: not yet compatible under concurrency.** On the DB scenarios
-   `massless[django-asyncio]` *hangs* (8 / 4 rps; a single request is correct). The fork's
-   native-async ORM opens connections on the event loop, but massless closes the response
-   (and thus connections) via `sync_to_async(close)` on the executor thread, so async
-   connections are not released, the pool exhausts, and concurrent requests stall.
+2. **Async ORM (single-row): fixed, and it beats granian.** `massless[django-asyncio]` does
+   1,788 rps at 99.5% CPU, ahead of granian+fork (1,667) on massless's lighter server.
    `massless[django]` is bottlenecked differently: the stock ORM's `sync_to_async` serializes
    all 100 concurrent queries onto the one shared executor thread (488 rps at 46% CPU, not
-   CPU-bound), and db_heavy runs the 16 prefetch lookups sequentially there (12.5 rps).
-   granian+fork captures the native-async-ORM win (1,667 / 39.8) because its handler manages
-   the async connection lifecycle on the loop.
+   CPU-bound). The fix: massless tears down via `response.aclose()` when the response is
+   async-capable, so `request_finished` dispatches over `asend` and the fork's async-only
+   `aclose_old_connections` receiver runs on the event loop and returns the connection to its
+   async pool. Closing on the executor thread instead skipped that receiver and leaked the
+   connection (the pool then exhausted and requests stalled, the original `broken` here).
 
-So `massless[django-asyncio]` is a clear win for framework/middleware-bound apps and a
-regression for concurrent async-DB apps until massless learns to close async connections on
-the event loop. For DB-heavy workloads today, `massless[django]` (slow but correct) is the
-safe choice. Closing that gap (async-aware connection teardown in massless's dispatch) is
-the prerequisite for the full "combine both" win.
+3. **db_heavy still hangs under concurrency (*).** A single request is correct (200 in
+   ~28 ms), but at c=50 it stalls. This is the fork's native *parallel* prefetch borrowing
+   pooled connections for independent sub-queries; that borrow path doesn't yet work under
+   massless. It is a separate, deeper issue from the request teardown above and remains open.
+
+So `massless[django-asyncio]` now wins on framework, middleware, *and* single-row async DB.
+The remaining gap is the fork's parallel-prefetch borrowing (`db_heavy`).

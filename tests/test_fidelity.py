@@ -244,6 +244,30 @@ def test_request_started_and_finished_fire_in_order(handler):
     assert events == ["start", "finish"]
 
 
+def test_dispatch_awaits_aclose_for_async_capable_response():
+    # An async-capable Django (e.g. django-asyncio) exposes response.aclose(), which fires
+    # request_finished via asend so async DB connections are returned to their pool on the
+    # event loop. dispatch must await aclose() rather than sync_to_async(close); closing on
+    # the executor thread skips the async-only receiver and leaks the connection.
+    from django.http import HttpResponse
+
+    calls = []
+
+    class _AcloseResponse(HttpResponse):
+        async def aclose(self):
+            calls.append("aclose")
+            self.close()
+
+    class _Handler:
+        async def handle(self, request):
+            return _AcloseResponse(b"ok")
+
+    raw, _ = asyncio.run(dispatch(_Handler(), parse_request(b"GET /sync HTTP/1.1\r\nHost: x\r\n\r\n")))
+    assert calls == ["aclose"]
+    assert raw.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert raw.endswith(b"ok")
+
+
 # --------------------------------------------------------------- end-to-end over a socket
 
 

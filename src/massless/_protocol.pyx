@@ -181,11 +181,17 @@ async def dispatch(handler, RequestCore core, bint keep_alive=True):
     cdef object conn = dj_resp.headers.get("Connection")
     if conn is not None and conn.lower() == "close":
         keep_alive = False
-    # Run the Django response's resource closers (fires request_finished and closes
-    # per-request resources, e.g. DB connections and temp upload files). Run it on the
-    # thread-sensitive executor like Django's ASGIHandler (asgi.py), so request_finished's
-    # close_old_connections runs where the sync views' DB connections actually live.
-    await sync_to_async(dj_resp.close, thread_sensitive=True)()
+    # Tear down per-request resources and fire request_finished. An async-capable Django
+    # (e.g. django-asyncio) exposes response.aclose(), which dispatches request_finished via
+    # asend so its async-only aclose_old_connections receiver runs on THIS event loop and
+    # returns the async DB connection to its pool; closing on the executor thread instead
+    # would skip that receiver and leak the connection, exhausting the pool under load.
+    # Stock Django has only sync receivers, so close() runs on the thread-sensitive executor
+    # where the sync ORM's connections live, matching its own ASGIHandler.
+    if hasattr(dj_resp, "aclose"):
+        await dj_resp.aclose()
+    else:
+        await sync_to_async(dj_resp.close, thread_sensitive=True)()
     return resp.to_bytes(keep_alive, core._method), keep_alive
 
 
