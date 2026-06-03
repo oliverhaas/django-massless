@@ -23,11 +23,20 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
-dependencies = [
-  "Django>=5.2,<7",
-  "httptools>=0.6.4",
-  "msgspec>=0.18",
-  "uvloop>=0.21",
+dependencies = ["httptools>=0.6.4", "msgspec>=0.18", "uvloop>=0.21"]
+
+# massless is backed by Django but does not pin which one. Install exactly one of
+# these extras (both provide the `django` import package, so they are mutually
+# exclusive):
+#   pip install django-massless[django]          # stock Django
+#   pip install django-massless[django-asyncio]  # the async-optimized Django fork
+# The fork rewrites the built-in middleware/ORM as native-async, removing the
+# per-middleware sync_to_async tax massless cannot fix on its own (it runs Django's
+# middleware as-is); see benchmarks/results/DROPIN-DJANGO-VARIANTS.md.
+[project.optional-dependencies]
+django = ["Django>=5.2,<7"]
+django-asyncio = [
+  "django @ git+https://github.com/oliverhaas/django-asyncio.git",
 ]
 
 [project.urls]
@@ -51,6 +60,13 @@ dev = [
 [build-system]
 requires = ["setuptools>=82.0.1", "cython>=3.2.5"]
 build-backend = "setuptools.build_meta"
+
+[tool.uv]
+# The `django` and `django-asyncio` extras both provide the `django` package from
+# different sources (PyPI vs the git fork). Declaring them as conflicting makes uv
+# lock them as mutually-exclusive resolutions so `--extra django` resolves to stock
+# Django, not the fork.
+conflicts = [[{ extra = "django" }, { extra = "django-asyncio" }]]
 
 [tool.setuptools.packages.find]
 where = ["src"]

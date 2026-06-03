@@ -21,6 +21,22 @@ is identical to running under uvicorn.
 > Phase 1 (serve a normal Django project) is implemented; `MIDDLEWARE_STACKS` and
 > streaming are in progress. APIs are unstable; not yet released to PyPI.
 
+## Install
+
+massless is backed by Django but does not pin which one. Install exactly one extra
+(both provide the `django` package, so they are mutually exclusive):
+
+```console
+pip install django-massless[django]          # stock Django
+pip install django-massless[django-asyncio]  # the async-optimized Django fork
+```
+
+`[django-asyncio]` pulls the [django-asyncio fork](https://github.com/oliverhaas/django-asyncio),
+whose native-async middleware/ORM removes the per-middleware `sync_to_async` tax massless
+cannot fix on its own. On a full middleware stack that is ~2.9x faster than stock Django
+under massless ([benchmarks/results/DROPIN-DJANGO-VARIANTS.md](benchmarks/results/DROPIN-DJANGO-VARIANTS.md)).
+It is experimental (the fork tracks a dev branch).
+
 ## Quick start
 
 No app code changes. Point massless at your existing Django project:

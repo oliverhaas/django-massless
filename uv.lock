@@ -5,6 +5,10 @@ resolution-markers = [
     "python_full_version >= '3.15'",
     "python_full_version < '3.15'",
 ]
+conflicts = [[
+    { package = "django-massless", extra = "django" },
+    { package = "django-massless", extra = "django-asyncio" },
+]]
 
 [[package]]
 name = "asgiref"
@@ -69,7 +73,7 @@ name = "click"
 version = "8.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-15-django-massless-django' and extra == 'extra-15-django-massless-django-asyncio')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9b/98/518d8e5081007684232226f475082b30087d0f585e8457db087298259f49/click-8.4.1.tar.gz", hash = "sha256:918b5633eddf6b41c32d4f454bf0de810065c74e3f7dbf8ee5452f8be88d3e96", size = 353007, upload-time = "2026-05-22T04:08:37.769Z" }
 wheels = [
@@ -212,10 +216,14 @@ wheels = [
 name = "django"
 version = "6.0.5"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.15'",
+    "python_full_version < '3.15'",
+]
 dependencies = [
     { name = "asgiref" },
     { name = "sqlparse" },
-    { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "tzdata", marker = "(sys_platform == 'win32' and extra == 'extra-15-django-massless-django') or (sys_platform == 'win32' and extra != 'extra-15-django-massless-django-asyncio') or (extra == 'extra-15-django-massless-django' and extra == 'extra-15-django-massless-django-asyncio')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5e/f1/bf85f0d29ef76abf901f193fe8fef4769d3da7794197832bc30151c071d8/django-6.0.5.tar.gz", hash = "sha256:bc6d6872e98a2864c836e42edd644b362db311147dd5aa8d5b82ba7a032f5269", size = 10924131, upload-time = "2026-05-05T13:54:39.329Z" }
 wheels = [
@@ -223,14 +231,35 @@ wheels = [
 ]
 
 [[package]]
+name = "django"
+version = "6.2.dev20260531102859"
+source = { git = "https://github.com/oliverhaas/django-asyncio.git#ec0226fb255e1ee25439dd2158ad438d523cf57c" }
+resolution-markers = [
+    "python_full_version >= '3.15'",
+    "python_full_version < '3.15'",
+]
+dependencies = [
+    { name = "asgiref", marker = "extra == 'extra-15-django-massless-django-asyncio'" },
+    { name = "sqlparse", marker = "extra == 'extra-15-django-massless-django-asyncio'" },
+    { name = "tzdata", marker = "(sys_platform == 'win32' and extra == 'extra-15-django-massless-django-asyncio') or (extra == 'extra-15-django-massless-django' and extra == 'extra-15-django-massless-django-asyncio')" },
+]
+
+[[package]]
 name = "django-massless"
 version = "0.1.0a1"
 source = { editable = "." }
 dependencies = [
-    { name = "django" },
     { name = "httptools" },
     { name = "msgspec" },
     { name = "uvloop" },
+]
+
+[package.optional-dependencies]
+django = [
+    { name = "django", version = "6.0.5", source = { registry = "https://pypi.org/simple" } },
+]
+django-asyncio = [
+    { name = "django", version = "6.2.dev20260531102859", source = { git = "https://github.com/oliverhaas/django-asyncio.git#ec0226fb255e1ee25439dd2158ad438d523cf57c" } },
 ]
 
 [package.dev-dependencies]
@@ -249,11 +278,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "django", specifier = ">=5.2,<7" },
+    { name = "django", marker = "extra == 'django'", specifier = ">=5.2,<7" },
+    { name = "django", marker = "extra == 'django-asyncio'", git = "https://github.com/oliverhaas/django-asyncio.git" },
     { name = "httptools", specifier = ">=0.6.4" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "uvloop", specifier = ">=0.21" },
 ]
+provides-extras = ["django", "django-asyncio"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -274,7 +305,8 @@ name = "django-stubs"
 version = "6.0.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "django" },
+    { name = "django", version = "6.0.5", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-15-django-massless-django' or extra != 'extra-15-django-massless-django-asyncio'" },
+    { name = "django", version = "6.2.dev20260531102859", source = { git = "https://github.com/oliverhaas/django-asyncio.git#ec0226fb255e1ee25439dd2158ad438d523cf57c" }, marker = "extra == 'extra-15-django-massless-django-asyncio'" },
     { name = "django-stubs-ext" },
     { name = "types-pyyaml" },
     { name = "typing-extensions" },
@@ -289,7 +321,8 @@ name = "django-stubs-ext"
 version = "6.0.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "django" },
+    { name = "django", version = "6.0.5", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-15-django-massless-django' or extra != 'extra-15-django-massless-django-asyncio'" },
+    { name = "django", version = "6.2.dev20260531102859", source = { git = "https://github.com/oliverhaas/django-asyncio.git#ec0226fb255e1ee25439dd2158ad438d523cf57c" }, marker = "extra == 'extra-15-django-massless-django-asyncio'" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d8/01/419bc3cd882f3ec645d5a4511085202dd6bd3ef8d385871dcd2d32cc15b3/django_stubs_ext-6.0.5.tar.gz", hash = "sha256:1cc325e991303849bce70e19748981b225ef08b37256f263e113caf97cd3bcc0", size = 6666, upload-time = "2026-05-25T08:46:36.012Z" }
@@ -484,7 +517,7 @@ version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ast-serialize" },
-    { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "librt", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-15-django-massless-django' and extra == 'extra-15-django-massless-django-asyncio')" },
     { name = "mypy-extensions" },
     { name = "pathspec" },
     { name = "typing-extensions" },
@@ -606,7 +639,7 @@ name = "pytest"
 version = "9.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-15-django-massless-django' and extra == 'extra-15-django-massless-django-asyncio')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
