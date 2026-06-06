@@ -28,6 +28,12 @@ DATABASES = {
 
 USE_TZ = True
 
+# Allow the pool-lifecycle fast path (skip request_started/request_finished signal
+# dispatch, return connections directly) to be exercised across the whole suite.
+import os  # noqa: E402
+
+MASSLESS_POOL_LIFECYCLE = os.environ.get("MASSLESS_POOL_LIFECYCLE") == "1"
+
 ROOT_URLCONF = "settings.urls"
 
 # A minimal but representative middleware stack for the drop-in tests.

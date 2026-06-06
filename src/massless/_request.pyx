@@ -6,6 +6,12 @@ from django.core.handlers.wsgi import WSGIRequest
 
 from massless._proxy import forwarded_overrides
 
+# Optional per-request attributes Django probes via hasattr() before a view runs. An
+# un-promoted MasslessRequest reports these absent instead of promoting to a full
+# WSGIRequest (see MasslessRequest.__getattr__). "urlconf" is probed by resolve_request
+# on every request; a request that needs an override sets the attr directly.
+_NO_PROMOTE_ATTRS = frozenset({"urlconf"})
+
 
 cdef class RequestCore:
     @staticmethod
@@ -252,6 +258,14 @@ class MasslessRequest(WSGIRequest):
     def __getattr__(self, name):
         # Called only on a normal-lookup miss.
         if name.startswith("_") or self.__dict__.get("_is_django"):
+            raise AttributeError(name)
+        if name in _NO_PROMOTE_ATTRS:
+            # Optional per-request attributes Django probes with hasattr() before any
+            # view runs (urlconf in resolve_request). An un-promoted request lacks them,
+            # and a promoted WSGIRequest would not have them set either, so promoting to
+            # answer the probe builds a full WSGI environ for nothing. Report absent and
+            # stay on the fast path; a middleware that genuinely sets one writes the
+            # instance attr directly, which normal lookup finds without __getattr__.
             raise AttributeError(name)
         self._promote()
         return object.__getattribute__(self, name)

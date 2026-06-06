@@ -1,10 +1,19 @@
 import asyncio
-import contextlib
 import logging
 
 import httptools
-from asgiref.sync import sync_to_async
+from asgiref.sync import iscoroutinefunction, sync_to_async
+from django.conf import settings as _settings
+from django.core.handlers.exception import response_for_exception as _response_for_exception
 from django.core.signals import request_started
+from django.db import close_old_connections as _close_old_connections
+from django.urls import get_urlconf as _get_urlconf
+from django.utils.log import log_response as _log_response
+
+try:
+    from django.db import aclose_old_connections as _aclose_old_connections
+except ImportError:  # stock Django has no async-native connection teardown
+    _aclose_old_connections = None
 
 _logger = logging.getLogger("massless")
 
@@ -12,8 +21,14 @@ from massless._request cimport RequestCore
 from massless._request import MasslessRequest
 from massless._response cimport Response
 from massless._response import build_http_response
+from massless.responses import _Fast as _FastResponse
+from massless.handler import _LazyResolverMatch
 
 cdef bytes _CONTINUE = b"HTTP/1.1 100 Continue\r\n\r\n"
+
+# Pushed into a connection's queue when a graceful drain begins, so an idle worker
+# blocked on queue.get() wakes and exits without a per-request task race.
+cdef object _DRAIN_SENTINEL = object()
 
 
 cdef class _Collector:
@@ -162,14 +177,84 @@ async def dispatch(handler, RequestCore core, bint keep_alive=True):
     sync_to_async, thread-sensitive), so no separate executor branch is needed
     here; async views are awaited on the loop. Returns (wire_bytes, keep_alive),
     where keep_alive reflects a "Connection: close" the response itself may carry.
+
+    With ``MASSLESS_POOL_LIFECYCLE`` the per-request signal dispatch is skipped:
+    request_started is not fired and teardown returns connections directly (the
+    pool-mode teardown branch below). This drops the lifecycle-signal overhead
+    (~the bulk of the no-DB pipeline tax) and matches django-bolt, which relies
+    on a pool instead.
     """
+    cdef bint fast = getattr(handler, "_pool_lifecycle", False)
+    cdef bint took_fast = False
+    cdef object rmatch
+    cdef object callback
     request = MasslessRequest(core, {})
-    # request_started pairs with request_finished (fired by dj_resp.close() below);
-    # together they drive Django's per-request DB connection / query-log management.
-    await request_started.asend(sender=type(handler))
-    dj_resp = await handler.handle(request)
+    dj_resp = None
+    # Fast path inlined: when the handler has no middleware and no ATOMIC_REQUESTS, route
+    # with the Cython router and run the view here -- a faithful copy of
+    # MasslessHandler._fast_dispatch (verified by the differential tests). Inlining it
+    # collapses the dispatch -> handle -> _fast_dispatch -> view -> teardown coroutine
+    # chain into this one coroutine, which is the bulk of the per-request cost.
+    # The gate already establishes the active urlconf == the router's (ROOT_URLCONF), so an
+    # explicit set_urlconf would be redundant: an unset thread-local resolves to
+    # ROOT_URLCONF anyway (get_resolver(None) -> default), so error-handler resolution and
+    # reverse() are correct without paying a per-request thread-local write.
+    if getattr(handler, "_fast_ok", False) and "urlconf" not in request.__dict__ \
+            and _get_urlconf(_settings.ROOT_URLCONF) == handler._router_urlconf:
+        rmatch = handler._router.match(request.path_info.encode("utf-8"))
+        if rmatch is not None:
+            took_fast = True
+            callback = rmatch[0]
+            request.resolver_match = _LazyResolverMatch(callback, rmatch[1], rmatch[2], rmatch[3])
+            if not fast:
+                await request_started.asend(sender=type(handler))
+            try:
+                if rmatch[4]:  # is_async, precomputed at router build
+                    dj_resp = await callback(request, *rmatch[1], **rmatch[2])
+                else:
+                    dj_resp = await sync_to_async(callback, thread_sensitive=True)(request, *rmatch[1], **rmatch[2])
+                handler.check_response(dj_resp, callback)
+                if hasattr(dj_resp, "render") and callable(dj_resp.render):
+                    if iscoroutinefunction(dj_resp.render):
+                        dj_resp = await dj_resp.render()
+                    else:
+                        dj_resp = await sync_to_async(dj_resp.render, thread_sensitive=True)()
+                if asyncio.iscoroutine(dj_resp):
+                    raise RuntimeError("Response is still a coroutine.")
+            except Exception as exc:
+                dj_resp = await sync_to_async(_response_for_exception, thread_sensitive=False)(request, exc)
+            dj_resp._resource_closers.append(request.close)
+            if dj_resp.status_code >= 400:
+                await sync_to_async(_log_response, thread_sensitive=False)(
+                    "%s: %s", getattr(dj_resp, "reason_phrase", ""), request.path,
+                    response=dj_resp, request=request)
+    if not took_fast:
+        # request_started pairs with request_finished (teardown below); together they
+        # drive Django's per-request DB connection / query-log management. In pool mode
+        # the pool owns that, so the signal is skipped on both ends.
+        if not fast:
+            await request_started.asend(sender=type(handler))
+        dj_resp = await handler.handle(request)
     cdef Response resp
-    if getattr(dj_resp, "streaming", False):
+    cdef object conn
+    cdef object body
+    cdef object ctype
+    if isinstance(dj_resp, _FastResponse):
+        # Fast-tier response: serialize the body with msgspec at the C layer (no json.dumps,
+        # no Django body re-fold). It is a real HttpResponse subclass, so any header/cookie a
+        # middleware set lives on .headers/.cookies; carry them over, letting the C serializer
+        # own Content-Type (from _serialize), Content-Length, and Connection.
+        body, ctype = dj_resp._serialize()
+        resp = Response(dj_resp.status_code, {}, body, ctype, b"")
+        resp.ct_present = bool(ctype)
+        for _hname, _hvalue in dj_resp.headers.items():
+            _hlow = _hname.lower()
+            if _hlow == "content-type" or _hlow == "content-length" or _hlow == "connection":
+                continue
+            resp.headers[_hname] = _hvalue
+        for _morsel in dj_resp.cookies.values():
+            resp.cookies.append(_morsel.OutputString())
+    elif getattr(dj_resp, "streaming", False):
         # Streaming responses are a later phase (the C serializer reads .content, which
         # a StreamingHttpResponse does not have). Return a clear 501 instead of letting
         # the missing .content surface as an opaque 500.
@@ -178,9 +263,9 @@ async def dispatch(handler, RequestCore core, bint keep_alive=True):
                         b"text/plain; charset=utf-8", b"Not Implemented")
     else:
         resp = _django_response_to_massless(dj_resp)
-    cdef object conn = dj_resp.headers.get("Connection")
-    if conn is not None and conn.lower() == "close":
-        keep_alive = False
+        conn = dj_resp.headers.get("Connection")
+        if conn is not None and conn.lower() == "close":
+            keep_alive = False
     # Tear down per-request resources and fire request_finished. An async-capable Django
     # (e.g. django-asyncio) exposes response.aclose(), which dispatches request_finished via
     # asend so its async-only aclose_old_connections receiver runs on THIS event loop and
@@ -188,7 +273,21 @@ async def dispatch(handler, RequestCore core, bint keep_alive=True):
     # would skip that receiver and leak the connection, exhausting the pool under load.
     # Stock Django has only sync receivers, so close() runs on the thread-sensitive executor
     # where the sync ORM's connections live, matching its own ASGIHandler.
-    if hasattr(dj_resp, "aclose"):
+    if fast:
+        # Pool mode: run resource closers + return the DB connection directly, no
+        # request_finished signal dispatch (bolt-style pool teardown, no extra frame).
+        for closer in dj_resp._resource_closers:
+            try:
+                closer()
+            except Exception:
+                pass
+        dj_resp._resource_closers.clear()
+        dj_resp.closed = True
+        if _aclose_old_connections is not None:
+            await _aclose_old_connections()
+        else:
+            await sync_to_async(_close_old_connections, thread_sensitive=True)()
+    elif hasattr(dj_resp, "aclose"):
         await dj_resp.aclose()
     else:
         await sync_to_async(dj_resp.close, thread_sensitive=True)()
@@ -219,6 +318,7 @@ class MasslessProtocol(asyncio.Protocol):
         self._collector.set_parser(self._parser)
         self._queue = asyncio.Queue()
         self._worker = None
+        self._drain_waker = None
 
     def connection_made(self, transport):
         self._transport = transport
@@ -266,9 +366,21 @@ class MasslessProtocol(asyncio.Protocol):
             core = RequestCore.create(method, parsed.path, query, headers, body, self._peer, self._sockname)
             self._queue.put_nowait((core, keep_alive))
 
+    async def _wake_on_drain(self):
+        # One task per connection (not per request): when the shared drain begins, push
+        # a sentinel so an idle worker blocked on queue.get() wakes and exits.
+        if self._handler._drain_event is None:
+            self._handler._drain_event = asyncio.Event()
+        try:
+            await self._handler._drain_event.wait()
+            self._queue.put_nowait(_DRAIN_SENTINEL)
+        except asyncio.CancelledError:
+            pass
+
     async def _process_loop(self):
         loop = asyncio.get_running_loop()
         inflight = self._handler._inflight
+        self._drain_waker = loop.create_task(self._wake_on_drain())
         cdef RequestCore core
         try:
             while True:
@@ -278,8 +390,8 @@ class MasslessProtocol(asyncio.Protocol):
                 if self._handler._draining and self._queue.empty():
                     self._close_transport()
                     return
-                item = await self._next_item()
-                if item is None:
+                item = await self._queue.get()
+                if item is _DRAIN_SENTINEL:
                     # Woken by the drain with no queued work: close + exit cleanly.
                     self._close_transport()
                     return
@@ -316,6 +428,9 @@ class MasslessProtocol(asyncio.Protocol):
                         done.set_result(None)
         except asyncio.CancelledError:
             pass
+        finally:
+            if self._drain_waker is not None and not self._drain_waker.done():
+                self._drain_waker.cancel()
 
     def _close_transport(self):
         """Close this connection's transport if still open (used when a worker
@@ -323,38 +438,3 @@ class MasslessProtocol(asyncio.Protocol):
         complete)."""
         if self._transport is not None and not self._transport.is_closing():
             self._transport.close()
-
-    async def _next_item(self):
-        """Return the next queued (core,), or ``None`` if a drain wakes an idle
-        connection that has nothing queued.
-
-        We race ``queue.get()`` against the shared drain event so an idle
-        keep-alive worker loop, otherwise blocked here forever, exits promptly
-        once a graceful shutdown begins instead of stalling the server's drain.
-        """
-        loop = asyncio.get_running_loop()
-        # The drain event is normally created by serve_async; create one lazily
-        # for serving paths (e.g. tests) that drive the protocol directly.
-        if self._handler._drain_event is None:
-            self._handler._drain_event = asyncio.Event()
-        get_task = loop.create_task(self._queue.get())
-        drain_wait = loop.create_task(self._handler._drain_event.wait())
-        try:
-            await asyncio.wait(
-                {get_task, drain_wait}, return_when=asyncio.FIRST_COMPLETED
-            )
-        finally:
-            drain_wait.cancel()
-        if get_task.done():
-            return get_task.result()
-        # Drain fired first; cancel the pending get. ``Queue.get`` may have
-        # already dequeued an item just before cancellation lands -- if so it is
-        # held in the task result, so re-check rather than dropping a request.
-        get_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await get_task
-        if get_task.cancelled():
-            if not self._queue.empty():
-                return self._queue.get_nowait()
-            return None
-        return get_task.result()

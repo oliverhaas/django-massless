@@ -30,9 +30,12 @@ dependencies = ["httptools>=0.6.4", "msgspec>=0.18", "uvloop>=0.21"]
 # exclusive):
 #   pip install django-massless[django]          # stock Django
 #   pip install django-massless[django-asyncio]  # the async-optimized Django fork
-# The fork rewrites the built-in middleware/ORM as native-async, removing the
-# per-middleware sync_to_async tax massless cannot fix on its own (it runs Django's
-# middleware as-is); see benchmarks/results/DROPIN-DJANGO-VARIANTS.md.
+# massless's own middleware chain (massless._chain) substitutes native-async fast
+# re-implementations for the common built-in middleware (security/common/clickjacking/
+# gzip/conditional-get; see massless._middleware), so the per-middleware sync_to_async
+# tax is removed on stock Django too (~5.6x on the middleware path in-process). The fork
+# additionally rewrites the ORM and remaining built-in middleware as native-async; see
+# benchmarks/results/DROPIN-DJANGO-VARIANTS.md.
 [project.optional-dependencies]
 django = ["Django>=5.2,<7"]
 django-asyncio = [
@@ -98,7 +101,9 @@ fix = true
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["COM812", "D", "E501", "EM", "TRY003"]
+# FBT003: call-site boolean traps are unavoidable against fixed-signature APIs we call
+# positionally (Django's adapt_method_mode(is_async, ...), massless's Cython to_bytes(keep_alive, ...)).
+ignore = ["COM812", "D", "E501", "EM", "FBT003", "TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
@@ -120,7 +125,7 @@ ignore = ["COM812", "D", "E501", "EM", "TRY003"]
 ]
 # Benchmark CLI scripts and apps: print is their output; view/settings code is
 # fixture-grade (unused request args, hardcoded secret-key, in-fixture imports).
-"benchmarks/**" = ["ANN", "ARG001", "PLC0415", "S105", "T201"]
+"benchmarks/**" = ["ANN", "ARG", "INP001", "PLC0415", "S105", "T201"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -135,8 +140,22 @@ warn_unused_ignores = true
 django_settings_module = "tests.settings.base"
 
 [[tool.mypy.overrides]]
-module = ["massless._request", "massless._response", "massless._protocol"]
+module = [
+  "massless._request",
+  "massless._response",
+  "massless._protocol",
+  "massless._router",
+]
 ignore_missing_imports = true
+
+# _middleware faithfully mirrors Django's own middleware and reuses its cache helpers. It
+# duck-types the response (accessing HttpResponse/StreamingHttpResponse attributes through the
+# HttpResponseBase the hooks receive -> attr-defined) and calls get_conditional_response, whose
+# django-stubs signature is imprecise (arg-type/return-value). Behavior is covered by the
+# differential suite (tests/test_chain.py), not the type checker.
+[[tool.mypy.overrides]]
+module = ["massless._middleware"]
+disable_error_code = ["attr-defined", "arg-type", "return-value"]
 
 [tool.pytest.ini_options]
 addopts = "--cov=massless --cov-report=term-missing --cov-report=xml --no-cov-on-fail"
