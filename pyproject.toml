@@ -125,7 +125,16 @@ ignore = ["COM812", "D", "E501", "EM", "FBT003", "TRY003"]
 ]
 # Benchmark CLI scripts and apps: print is their output; view/settings code is
 # fixture-grade (unused request args, hardcoded secret-key, in-fixture imports).
-"benchmarks/**" = ["ANN", "ARG", "INP001", "PLC0415", "S105", "T201"]
+"benchmarks/**" = [
+  "ANN",
+  "ARG",
+  "INP001",
+  "PLC0415",
+  "S101",
+  "S105",
+  "SLF001",
+  "T201",
+]
 
 [tool.mypy]
 python_version = "3.12"
