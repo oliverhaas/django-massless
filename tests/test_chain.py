@@ -15,9 +15,12 @@ Two kinds of test:
 """
 
 import asyncio
+import threading
 
 import pytest
 from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+from django.contrib.messages.storage.base import BaseStorage
+from django.contrib.sessions.middleware import SessionMiddleware as _StockSessionMiddleware
 from django.core.exceptions import MiddlewareNotUsed
 from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse
 from django.template.response import SimpleTemplateResponse
@@ -71,6 +74,39 @@ def v_etag(request):
 
 def v_big(request):
     return HttpResponse(b"x" * 500, content_type="text/plain")
+
+
+def v_session_write(request):
+    request.session["k"] = "v"  # modifies the session -> Set-Cookie on response
+    return HttpResponse(b"sw")
+
+
+def v_session_read(request):
+    request.session.get("k")  # accesses but does not modify -> Vary: Cookie, no Set-Cookie
+    return HttpResponse(b"sr")
+
+
+def v_user(request):
+    # Exercises AuthenticationMiddleware's lazy user (AnonymousUser, no DB hit).
+    return HttpResponse(b"auth" if request.user.is_authenticated else b"anon")
+
+
+def v_message(request):
+    from django.contrib import messages
+
+    messages.add_message(request, messages.INFO, "hi")  # cookie storage -> Set-Cookie
+    return HttpResponse(b"msg")
+
+
+def v_session_write_500(request):
+    request.session["k"] = "v"  # modified, but a 5xx response must skip the save
+    return HttpResponse(b"err", status=500)
+
+
+def v_session_flush(request):
+    request.session["k"] = "v"
+    request.session.flush()  # empties the session + clears the key -> delete-cookie branch
+    return HttpResponse(b"sf")
 
 
 class SyncCBV(View):
@@ -242,6 +278,10 @@ COMMON = "django.middleware.common.CommonMiddleware"
 XFRAME = "django.middleware.clickjacking.XFrameOptionsMiddleware"
 CONDITIONAL = "django.middleware.http.ConditionalGetMiddleware"
 GZIP = "django.middleware.gzip.GZipMiddleware"
+SESSION = "django.contrib.sessions.middleware.SessionMiddleware"
+CSRF = "django.middleware.csrf.CsrfViewMiddleware"
+AUTH = "django.contrib.auth.middleware.AuthenticationMiddleware"
+MESSAGES = "django.contrib.messages.middleware.MessageMiddleware"
 
 urlpatterns = [
     path("json", v_json),
@@ -258,10 +298,25 @@ urlpatterns = [
     path("tpl", v_template),
     path("slash/", v_json),
     path("big", v_big),
+    path("sw", v_session_write),
+    path("sr", v_session_read),
+    path("user", v_user),
+    path("msg", v_message),
+    path("sw500", v_session_write_500),
+    path("sf", v_session_flush),
 ]
 
 REAL_STACK = [SECURITY, COMMON, XFRAME, CONDITIONAL, GZIP]
 SYNTH_STACK = [f"{M}.MwA", f"{M}.MwB", f"{M}.MwC"]
+# A realistic production stack whose stateful members (Session/CSRF/Auth/Messages) are the
+# ones the chain now substitutes with native-async re-impls. signed_cookies + cookie messages
+# keep it DB-free so the differential needs no database.
+STATEFUL_STACK = [SECURITY, SESSION, COMMON, CSRF, AUTH, MESSAGES, XFRAME]
+_NO_DB_SESSION = {
+    "SESSION_ENGINE": "django.contrib.sessions.backends.signed_cookies",
+    "SESSION_EXPIRE_AT_BROWSER_CLOSE": True,  # no time-dependent expires -> deterministic Set-Cookie
+    "MESSAGE_STORAGE": "django.contrib.messages.storage.cookie.CookieStorage",
+}
 
 
 def _mkreq(target, method="GET", headers=()):
@@ -280,10 +335,17 @@ def _snap(resp):
     )
 
 
-def _run_both(stack, target, method="GET", headers=()):
+def _run_both(stack, target, method="GET", headers=(), *, freeze_time=False, **extra):
     """Build a handler under `stack`, run the request through the chain and through
-    Django's get_response_async on fresh equivalent requests, return both snapshots."""
-    with override_settings(MIDDLEWARE=stack, ROOT_URLCONF=M, DEBUG=False):
+    Django's get_response_async on fresh equivalent requests, return both snapshots.
+
+    `extra` is merged into override_settings (e.g. SESSION_ENGINE). `freeze_time` pins
+    time.time() for both runs so TimestampSigner-stamped cookies (signed_cookies sessions)
+    come out byte-identical instead of racing the clock between the two calls."""
+    import contextlib
+    from unittest import mock
+
+    with override_settings(MIDDLEWARE=stack, ROOT_URLCONF=M, DEBUG=False, **extra):
         handler = MasslessHandler()
 
         async def go():
@@ -291,7 +353,9 @@ def _run_both(stack, target, method="GET", headers=()):
             oracle = await handler.get_response_async(_mkreq(target, method, headers))
             return _snap(chain), _snap(oracle)
 
-        return asyncio.run(go())
+        clock = mock.patch("time.time", return_value=1_700_000_000.0) if freeze_time else contextlib.nullcontext()
+        with clock:
+            return asyncio.run(go())
 
 
 # --------------------------------------------------------------------------- differential
@@ -369,16 +433,195 @@ def test_chain_gzip_compression_matches():
 
 
 def test_chain_substitutes_fast_implementations():
-    # The registered stock middleware must be replaced by their FastLayer in the chain;
-    # an unregistered (synthetic) one must stay as-is. This guards against the registry
+    # The registered stock middleware must be replaced by our same-named native-async class in
+    # the chain; an unregistered (synthetic) one must stay as-is. This guards against the registry
     # silently no-op'ing, which would make the differential a meaningless real-vs-real check.
-    from massless._middleware import CommonFast, GZipFast, SecurityFast, XFrameFast
+    from massless import _middleware as mw
 
     with override_settings(MIDDLEWARE=[*REAL_STACK, f"{M}.MwA"], ROOT_URLCONF=M, DEBUG=False):
         handler = MasslessHandler()
         classes = {type(layer) for layer in handler._chain.layers}
-    assert {SecurityFast, CommonFast, XFrameFast, GZipFast} <= classes
+    assert {mw.SecurityMiddleware, mw.CommonMiddleware, mw.XFrameOptionsMiddleware, mw.GZipMiddleware} <= classes
+    # The substitutes are massless classes, not Django's, despite the matching names.
+    assert all(t.__module__ == "massless._middleware" for t in (mw.SecurityMiddleware, mw.GZipMiddleware))
     assert any(t.__name__ == "MwA" for t in classes)  # unregistered: not substituted
+
+
+def test_chain_substitutes_stateful_fast_implementations():
+    # The stateful built-ins (Session/CSRF/Auth/Messages) are substituted too, by our same-named
+    # native-async subclasses -- not left as the stock MiddlewareMixin classes that thread-hop.
+    from massless import _middleware as mw
+
+    with override_settings(MIDDLEWARE=STATEFUL_STACK, ROOT_URLCONF=M, DEBUG=False, **_NO_DB_SESSION):
+        handler = MasslessHandler()
+        classes = {type(layer) for layer in handler._chain.layers}
+    assert {
+        mw.SessionMiddleware,
+        mw.CsrfViewMiddleware,
+        mw.AuthenticationMiddleware,
+        mw.MessageMiddleware,
+    } <= classes
+    assert all(t.__module__ == "massless._middleware" for t in classes if t.__name__.endswith("Middleware"))
+
+
+# ----------------------------------------------------------------- stateful middleware differential
+
+_STATEFUL_REQUESTS = [
+    ("/json", "GET", ()),  # CSRF safe-method accept; session/auth/messages attach but no cookie
+    ("/user", "GET", ()),  # AuthenticationMiddleware lazy AnonymousUser (no DB)
+    ("/sr", "GET", ()),  # session accessed, not modified -> Vary: Cookie, no Set-Cookie
+    ("/msg", "GET", ()),  # message added -> messages cookie (Signer, no timestamp -> deterministic)
+    ("/json", "POST", ()),  # CSRF enforcement: no cookie/token -> 403 reject
+]
+
+
+@pytest.mark.parametrize(("target", "method", "headers"), _STATEFUL_REQUESTS)
+def test_chain_matches_stateful_stack(target, method, headers):
+    chain, oracle = _run_both(STATEFUL_STACK, target, method, headers, **_NO_DB_SESSION)
+    assert chain == oracle
+
+
+def test_chain_matches_session_write():
+    # A session-modifying view must produce a byte-identical Set-Cookie from both paths. The
+    # signed_cookies key is TimestampSigner-stamped, so freeze the clock for a stable comparison.
+    chain, oracle = _run_both(STATEFUL_STACK, "/sw", freeze_time=True, **_NO_DB_SESSION)
+    assert chain == oracle
+    assert any(c.startswith("sessionid=") for c in chain[2])  # the session cookie was actually set
+
+
+def test_chain_stateful_outcomes_are_meaningful():
+    # Guard the differential isn't passing on a shared error: the POST is a real CSRF 403, the GET
+    # a real 200, and the lazy user is anonymous -- so identical snapshots mean identical success.
+    post, _ = _run_both(STATEFUL_STACK, "/json", "POST", **_NO_DB_SESSION)
+    assert post[0] == 403
+    get_, _ = _run_both(STATEFUL_STACK, "/json", "GET", **_NO_DB_SESSION)
+    assert get_[0] == 200
+    user, _ = _run_both(STATEFUL_STACK, "/user", **_NO_DB_SESSION)
+    assert user[3] == b"anon"
+
+
+def _signed_session_cookie(data: dict) -> str:
+    """Mint a signed_cookies sessionid value for `data` at the frozen test clock, so a re-save
+    under freeze_time reproduces it byte-for-byte."""
+    from unittest import mock
+
+    from django.contrib.sessions.backends.signed_cookies import SessionStore
+
+    with (
+        override_settings(SESSION_ENGINE="django.contrib.sessions.backends.signed_cookies"),
+        mock.patch("time.time", return_value=1_700_000_000.0),
+    ):
+        store = SessionStore()
+        store.update(data)
+        return store._get_session_key()
+
+
+def test_chain_matches_session_delete_cookie():
+    # An incoming session cookie + a session emptied by the view (flush) drives the delete-cookie
+    # branch of _aprocess_response (mirrors stock SessionMiddleware: delete_cookie + Vary: Cookie).
+    headers = (("Cookie", "sessionid=whatever"),)
+    chain, oracle = _run_both(STATEFUL_STACK, "/sf", headers=headers, freeze_time=True, **_NO_DB_SESSION)
+    assert chain == oracle
+    assert any(c.startswith("sessionid=") for c in chain[2])  # a delete (expired) cookie was emitted
+
+
+def test_chain_matches_session_save_every_request():
+    # SESSION_SAVE_EVERY_REQUEST forces a save of a non-empty, accessed-but-unmodified session.
+    cookie = _signed_session_cookie({"x": "y"})
+    headers = (("Cookie", f"sessionid={cookie}"),)
+    chain, oracle = _run_both(
+        STATEFUL_STACK,
+        "/sr",
+        headers=headers,
+        freeze_time=True,
+        SESSION_SAVE_EVERY_REQUEST=True,
+        **_NO_DB_SESSION,
+    )
+    assert chain == oracle
+    assert any(c.startswith("sessionid=") for c in chain[2])  # saved despite no modification
+
+
+def test_chain_matches_session_modified_5xx_skips_save():
+    # A modified session on a 5xx response must NOT save / set the session cookie (status_code<500
+    # guard), but must still patch Vary: Cookie. Both paths agree.
+    chain, oracle = _run_both(STATEFUL_STACK, "/sw500", freeze_time=True, **_NO_DB_SESSION)
+    assert chain == oracle
+    assert chain[0] == 500
+    assert not any(c.startswith("sessionid=") for c in chain[2])  # no session cookie on a 5xx
+
+
+class MySessionSubclass(_StockSessionMiddleware):
+    """A user subclass of a substituted middleware: must run as itself, never be swapped out."""
+
+
+def test_chain_substitutes_only_exact_dotted_paths():
+    # Substitution is keyed on the EXACT stock dotted path. A user subclass of a substituted
+    # middleware, and a builtin deliberately left out of the registry (Locale), must NOT be swapped.
+    from massless import _middleware as mw
+
+    locale = "django.middleware.locale.LocaleMiddleware"
+    stack = [SECURITY, SESSION, f"{M}.MySessionSubclass", locale]
+    with override_settings(MIDDLEWARE=stack, ROOT_URLCONF=M, DEBUG=False, **_NO_DB_SESSION):
+        handler = MasslessHandler()
+        layer_types = {type(layer) for layer in handler._chain.layers}
+    assert mw.SessionMiddleware in layer_types  # exact path -> substituted
+    assert MySessionSubclass in layer_types  # user subclass -> NOT substituted (runs as itself)
+    from django.middleware.locale import LocaleMiddleware
+
+    assert LocaleMiddleware in layer_types  # not in the registry -> NOT substituted
+
+
+def test_chain_matches_csrf_valid_token_accept():
+    # The positive CSRF path: a request with a matching cookie secret + masked header token must be
+    # ACCEPTED (200), exercising aprocess_view -> the inherited _check_token, byte-identical to stock.
+    from django.middleware.csrf import _get_new_csrf_string, _mask_cipher_secret
+
+    secret = _get_new_csrf_string()
+    headers = (("Cookie", f"csrftoken={secret}"), ("X-CSRFToken", _mask_cipher_secret(secret)))
+    chain, oracle = _run_both(STATEFUL_STACK, "/json", "POST", headers, **_NO_DB_SESSION)
+    assert chain == oracle
+    assert chain[0] == 200  # valid token accepted (contrast the no-token 403 in _STATEFUL_REQUESTS)
+
+
+# A non-cookie message storage that records the thread its store ran on -- used to prove the chain
+# runs a storage that isn't pure-CPU CookieStorage OFF the event loop (via sync_to_async), not inline.
+_MSG_THREADS: dict[str, threading.Thread] = {}
+
+
+class _ThreadSpyMessageStorage(BaseStorage):
+    def _get(self, *args, **kwargs):
+        return [], True
+
+    def _store(self, messages, response, *args, **kwargs):
+        _MSG_THREADS["store"] = threading.current_thread()
+        return []
+
+
+@pytest.mark.skipif(
+    hasattr(BaseStorage, "aupdate"),
+    reason="storage has a native aupdate (django-asyncio fork) -> the chain awaits it directly "
+    "(async, non-blocking on-loop); the sync_to_async off-loop fallback under test is stock-only",
+)
+def test_messages_non_cookie_storage_runs_off_the_loop():
+    # Regression: on stock Django a session/fallback/custom message storage can touch the session
+    # or do I/O in update(); running it inline would block the event loop. The fix routes it
+    # through sync_to_async (off-loop) exactly as stock does. Prove the store ran on a non-loop thread.
+    _MSG_THREADS.clear()
+    with override_settings(
+        MIDDLEWARE=[MESSAGES],
+        ROOT_URLCONF=M,
+        DEBUG=False,
+        MESSAGE_STORAGE=f"{M}._ThreadSpyMessageStorage",
+    ):
+        handler = MasslessHandler()
+
+        async def go():
+            _MSG_THREADS["loop"] = threading.current_thread()
+            return await handler._chain.run(_mkreq("/msg"))
+
+        asyncio.run(go())
+    assert "store" in _MSG_THREADS  # the storage actually ran
+    assert _MSG_THREADS["store"] is not _MSG_THREADS["loop"]  # off the loop -> not blocking it
 
 
 @pytest.mark.skipif(

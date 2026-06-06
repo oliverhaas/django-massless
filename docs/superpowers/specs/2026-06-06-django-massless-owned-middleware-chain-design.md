@@ -3,9 +3,39 @@
 Status: Approved direction (2026-06-06). Supersedes the 2026-06-01 "reuse Django's chain" decision.
 Author: lead architect, django-massless.
 
+### Update (2026-06-06b) — stateful middleware substituted + classes renamed
+
+The original phase delegated Session/CSRF/Auth/Messages to the real Django classes and concluded
+"the full-stack lever is the fork." That is now overturned. An in-process decomposition
+(`benchmarks/middleware_tax.py`, single-core) measured the four delegated middleware costing
+**612 us/req on stock**, ~74% of it pure `sync_to_async(thread_sensitive=True)` thread-hop tax
+(8 hooks at ~57 us), confirmed by the fork showing the same four cost only **26 us** intrinsic.
+So those middleware are now substituted too, with native-async re-implementations that **subclass
+the stock class** (inheriting every security-sensitive hook verbatim: CSRF token comparison,
+session save, the lazy-user attach) and only replace the thread-hopping `__acall__`:
+
+- `SessionMiddleware`: async `_aprocess_response` awaiting the backend's async API
+  (`asave`/`aget_expiry_age`). The `file` backend's `asave` is a sync passthrough and still blocks
+  on save (documented trade-off, matches django-asyncio).
+- `AuthenticationMiddleware`: inherited `process_request` (lazy user) run inline, no I/O.
+- `MessageMiddleware`: `CookieStorage.update()` (pure CPU) runs inline; `SessionStorage`/
+  `FallbackStorage`/custom run through `sync_to_async` (or a native `aupdate` when present) so the
+  loop is never blocked, exactly as stock does off-loop.
+- `CsrfViewMiddleware`: inherited `process_request`/`process_response` inline plus an `aprocess_view`
+  exposing the inherited `process_view` natively (no `adapt_method_mode` thread hop).
+
+**All nine substitutes are now named exactly like the Django middleware they replace** (no more
+`*Fast` suffix), so `REGISTRY` reads as a one-to-one replacement map and the drop-in intent is
+obvious. **Result (single-core, full 7-middleware stack, `middleware_tax.py`): ~810 to ~3270 rps,
+~4.0x on stock Django, fork-free.** The four stateful middleware now add ~28 us/req, not ~455 us
+of thread-hop tax. An adversarial review caught (and this fix closed) a loop-blocking divergence
+in `MessageMiddleware` for session-backed storage; differential tests were hardened for the
+delete-cookie, save-every-request, 5xx-skip-save, CSRF-accept, exact-path-substitution, and
+off-loop-storage paths. 219 tests green on stock, 64 on the fork.
+
 ### Implementation status (2026-06-06)
 
-Built and shipped (205 tests + the chain differential green on stock Django 6.0.5, and the
+Built and shipped (the chain differential green on stock Django 6.0.5, and the
 chain/response differential green against the django-asyncio fork via PYTHONPATH):
 
 - **Phase 1 — owned chain.** `src/massless/_chain.py` (`MasslessChain`): faithful re-housing

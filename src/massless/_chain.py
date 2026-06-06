@@ -81,7 +81,9 @@ class MasslessChain:
             # Substitute a fast re-implementation for an exact stock-path match; any other
             # (custom subclass, third-party) runs as the real Django class via import_string.
             fast = _REGISTRY.get(middleware_path) if self._fast_mw else None
-            middleware = fast if fast is not None else import_string(middleware_path)
+            # Any: the registry holds heterogeneous middleware classes and import_string is
+            # untyped; this mirrors Django's own dynamically-built load_middleware.
+            middleware: Any = fast if fast is not None else import_string(middleware_path)
             middleware_can_sync = getattr(middleware, "sync_capable", True)
             middleware_can_async = getattr(middleware, "async_capable", False)
             if not middleware_can_sync and not middleware_can_async:
