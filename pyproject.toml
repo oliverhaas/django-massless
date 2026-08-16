@@ -49,19 +49,19 @@ Repository = "https://github.com/oliverhaas/django-massless.git"
 [dependency-groups]
 dev = [
   "cython==3.2.9",
-  "django-stubs==6.0.8",
+  "django-stubs==6.1.0",
   "mypy==2.3.0",
-  "pre-commit==4.6.1",
+  "pre-commit==4.6.2",
   "pytest==9.1.1",
   "pytest-cov==7.1.0",
-  "pytest-django==4.13.0",
+  "pytest-django==4.14.0",
   "pytest-xdist==3.8.0",
-  "ruff==0.16.1",
-  "uvicorn==0.52.1",
+  "ruff==0.16.3",
+  "uvicorn==0.52.3",
 ]
 
 [build-system]
-requires = ["setuptools>=83.0.0", "cython>=3.2.9"]
+requires = ["setuptools>=84.0.0", "cython>=3.2.9"]
 build-backend = "setuptools.build_meta"
 
 [tool.uv]
