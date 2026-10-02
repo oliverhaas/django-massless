@@ -98,12 +98,15 @@ archs = ["arm64"]
 target-version = "py313"
 line-length = 120
 fix = true
+# Recent ruff formats Python code blocks inside Markdown. The plan and spec documents are
+# frozen historical records, so reformatting them is pure churn.
+extend-exclude = ["docs/superpowers"]
 
 [tool.ruff.lint]
 select = ["ALL"]
 # FBT003: call-site boolean traps are unavoidable against fixed-signature APIs we call
 # positionally (Django's adapt_method_mode(is_async, ...), massless's Cython to_bytes(keep_alive, ...)).
-ignore = ["COM812", "D", "E501", "EM", "FBT003", "TRY003"]
+ignore = ["COM812", "CPY", "D", "E501", "EM", "FBT003", "TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [

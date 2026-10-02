@@ -27,7 +27,7 @@ pytestmark = pytest.mark.usefixtures("allow_db_connection_management")
 # --------------------------------------------------------------------------- helpers
 
 
-def _req(method=b"GET", path=b"/", query=b"", headers=None, body=b"", client=None, server=None):  # noqa: PLR0913
+def _req(method=b"GET", path=b"/", query=b"", headers=None, body=b"", client=None, server=None):  # noqa: PLR0913, PLR0917
     core = RequestCore.py_create(method, path, query, headers or [], body, client, server)
     return MasslessRequest(core, {})
 
